@@ -1,0 +1,408 @@
+/* ==========================================================
+   Klädd – forside
+   Farver og mål fra wireframen i Figma, moderniseret med
+   iOS-agtigt frostet glas (backdrop-filter).
+   ========================================================== */
+
+:root {
+  /* Tekst og linjer fra wireframen */
+  --tekst: #344054;
+  --tekst-svag: #667085;
+  --linje: #d0d5dd;
+  --linje-knap: #98a2b3;
+  --flade: #f2f4f7;
+
+  /* Glas */
+  --glas: rgba(255, 255, 255, 0.55);
+  --glas-tonet: rgba(255, 255, 255, 0.38);
+  --glas-bar: rgba(255, 255, 255, 0.62);
+  --glas-kant: rgba(255, 255, 255, 0.75);
+  --glas-hairline: rgba(52, 64, 84, 0.1);
+  --sloer: blur(24px) saturate(180%);
+  --skygge: 0 1px 1px rgba(16, 24, 40, 0.04), 0 8px 32px rgba(16, 24, 40, 0.08);
+
+  /* Baggrund */
+  --himmel-top: #dfe7f5;
+  --himmel-bund: #eef0f7;
+
+  /* Layout */
+  --bredde: 430px;
+  --kant: 24px;
+  --fanebjaelke-hoejde: 84px;
+
+  --radius-kort: 22px;
+  --radius-felt: 14px;
+  --radius-knap: 14px;
+}
+
+*,
+*::before,
+*::after { box-sizing: border-box; }
+
+html { -webkit-text-size-adjust: 100%; }
+
+body {
+  margin: 0;
+  min-height: 100dvh;
+  font-family: "Inter", -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
+  color: var(--tekst);
+  background: linear-gradient(180deg, var(--himmel-top) 0%, var(--himmel-bund) 100%) fixed;
+  -webkit-font-smoothing: antialiased;
+  -webkit-tap-highlight-color: transparent;
+}
+
+h1, h2, p, ul, ol { margin: 0; padding: 0; }
+ul, ol { list-style: none; }
+button { font: inherit; color: inherit; }
+
+/* ---------- Baggrund ---------- */
+.baggrund {
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  overflow: hidden;
+  pointer-events: none;
+}
+.klat {
+  position: absolute;
+  border-radius: 50%;
+  filter: blur(60px);
+  opacity: 0.7;
+}
+.klat--1 { width: 340px; height: 340px; top: -80px; left: -90px; background: #a9c4f5; }
+.klat--2 { width: 300px; height: 300px; top: 34%; right: -120px; background: #f6c9b4; }
+.klat--3 { width: 360px; height: 360px; bottom: -120px; left: -60px; background: #c9bdf2; }
+
+/* ---------- App-ramme ---------- */
+.app {
+  position: relative;
+  max-width: var(--bredde);
+  margin: 0 auto;
+  min-height: 100dvh;
+}
+
+/* ---------- Glas ---------- */
+.glas {
+  background: var(--glas);
+  -webkit-backdrop-filter: var(--sloer);
+  backdrop-filter: var(--sloer);
+  border: 1px solid var(--glas-kant);
+  box-shadow: var(--skygge);
+}
+.glas--tonet {
+  background: var(--glas-tonet);
+  box-shadow: none;
+}
+
+/* ---------- Ikoner (24 × 24, placering som i Figma) ---------- */
+.ikon {
+  position: relative;
+  flex-shrink: 0;
+  width: 24px;
+  height: 24px;
+  overflow: hidden;
+}
+.ikon img {
+  position: absolute;
+  display: block;
+  max-width: none;
+}
+.ikon--home img,
+.ikon--info img     { left: 2px;      top: 2px;      width: 20px;    height: 20px; }
+.ikon--bookmark img { left: 5px;      top: 2px;      width: 14px;    height: 20px; }
+.ikon--user img     { left: 3px;      top: 3px;      width: 18px;    height: 19px; }
+.ikon--pin img      { left: 4px;      top: 2px;      width: 16px;    height: 20px; }
+.ikon--chevron img  { left: 8px;      top: 5px;      width: 8px;     height: 14px; }
+.ikon--rain img     { left: 2.01px;   top: 3.09px;   width: 20.68px; height: 18.91px; }
+
+/* ---------- Topbar / lokation ---------- */
+.topbar {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: calc(env(safe-area-inset-top) + 14px) var(--kant) 12px;
+  border-bottom: 1px solid transparent;
+  transition: background-color 0.25s ease, border-color 0.25s ease;
+}
+/* Når man scroller, bliver toppen til en frostet bjælke (styres i app.js) */
+.topbar.er-scrollet {
+  background: var(--glas-bar);
+  -webkit-backdrop-filter: var(--sloer);
+  backdrop-filter: var(--sloer);
+  border-bottom-color: var(--glas-hairline);
+}
+
+.lokation {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: -6px -10px;
+  padding: 6px 10px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  cursor: pointer;
+  transition: background-color 0.2s ease, transform 0.15s ease;
+}
+.lokation:hover { background: rgba(255, 255, 255, 0.4); }
+.lokation:active { transform: scale(0.97); }
+.lokation__by { font-size: 17px; font-weight: 600; }
+
+.topbar__vejr {
+  font-size: 15px;
+  font-weight: 500;
+  color: var(--tekst-svag);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---------- Indhold ---------- */
+.indhold {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 8px var(--kant) calc(var(--fanebjaelke-hoejde) + env(safe-area-inset-bottom) + 24px);
+}
+
+.kort {
+  display: flex;
+  flex-direction: column;
+  padding: 20px;
+  border-radius: var(--radius-kort);
+}
+
+.overskrift-lille {
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.35;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--tekst-svag);
+}
+
+/* ---------- Tøjkort ---------- */
+.tojkort { gap: 12px; }
+.tojkort__raad {
+  font-size: 26px;
+  font-weight: 700;
+  line-height: 1.35;
+  letter-spacing: -0.01em;
+}
+.hvorfor {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  color: var(--tekst-svag);
+}
+
+.toj {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+}
+.toj__vare {
+  flex: 1 0 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+}
+.toj__navn {
+  width: 100%;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 16px;
+  text-align: center;
+}
+
+/* Pladsholder-billeder (wireframens kryds) */
+.billede {
+  position: relative;
+  display: block;
+  overflow: hidden;
+  background: rgba(242, 244, 247, 0.6);
+  border: 1.5px solid rgba(208, 213, 221, 0.7);
+}
+.billede__kryds {
+  position: absolute;
+  inset: -1.5px;
+  display: block;
+  width: calc(100% + 3px);
+  height: calc(100% + 3px);
+  max-width: none;
+}
+.billede--toj {
+  width: 100%;
+  height: 80px;
+  border-radius: var(--radius-felt);
+}
+.billede--lille {
+  flex-shrink: 0;
+  width: 24px;
+  height: 24px;
+  border-radius: 8px;
+}
+.billede__etiket {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  padding: 3px 8px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.85);
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--tekst-svag);
+  white-space: nowrap;
+}
+
+/* ---------- Tag med ---------- */
+.tag-med {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 14px;
+  border-radius: var(--radius-felt);
+  font-size: 14px;
+  font-weight: 500;
+}
+
+/* ---------- I dag / tidslinje ---------- */
+.dag {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.tidslinje {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 18px;
+  border-radius: var(--radius-kort);
+}
+.time {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  font-variant-numeric: tabular-nums;
+}
+.time__kl {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--tekst-svag);
+}
+.time__grader {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+/* ---------- Opret profil ---------- */
+.opfordring {
+  gap: 8px;
+  background: var(--glas-tonet);
+  border-style: dashed;
+  border-color: rgba(152, 162, 179, 0.55);
+  box-shadow: none;
+}
+.opfordring__titel {
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 1.35;
+}
+.opfordring__tekst {
+  font-size: 14px;
+  line-height: 1.35;
+  color: var(--tekst-svag);
+}
+
+.knap {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 52px;
+  margin-top: 4px;
+  border: 1px solid var(--glas-kant);
+  border-radius: var(--radius-knap);
+  background: rgba(255, 255, 255, 0.7);
+  -webkit-backdrop-filter: var(--sloer);
+  backdrop-filter: var(--sloer);
+  box-shadow: 0 1px 2px rgba(16, 24, 40, 0.06), inset 0 0 0 1px rgba(152, 162, 179, 0.35);
+  font-size: 16px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: transform 0.15s ease, background-color 0.2s ease;
+}
+.knap:hover { background: rgba(255, 255, 255, 0.85); }
+.knap:active { transform: scale(0.98); }
+
+/* ---------- Fanebjælke ---------- */
+.fanebjaelke {
+  position: fixed;
+  z-index: 10;
+  bottom: 0;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 100%;
+  max-width: var(--bredde);
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  min-height: var(--fanebjaelke-hoejde);
+  padding: 10px 48px calc(env(safe-area-inset-bottom) + 10px);
+  background: var(--glas-bar);
+  -webkit-backdrop-filter: var(--sloer);
+  backdrop-filter: var(--sloer);
+  border-top: 1px solid var(--glas-hairline);
+}
+.fane {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  min-width: 48px;
+  color: var(--tekst);
+  text-decoration: none;
+  opacity: 0.4;
+  transition: opacity 0.2s ease, transform 0.15s ease;
+}
+.fane:hover { opacity: 0.65; }
+.fane:active { transform: scale(0.94); }
+.fane[aria-current="page"] { opacity: 1; }
+.fane__navn {
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.35;
+}
+.fane[aria-current="page"] .fane__navn { font-weight: 700; }
+
+/* ---------- Fokus ---------- */
+:where(button, a):focus-visible {
+  outline: 2px solid #5b8def;
+  outline-offset: 2px;
+}
+
+/* ---------- Fallbacks ---------- */
+/* Browsere uden backdrop-filter: mere dækkende hvid */
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .glas, .knap, .topbar.er-scrollet, .fanebjaelke { background: rgba(255, 255, 255, 0.92); }
+}
+
+/* Brugere der har slået gennemsigtighed fra */
+@media (prefers-reduced-transparency: reduce) {
+  .glas, .glas--tonet, .knap, .topbar.er-scrollet, .fanebjaelke {
+    background: #fff;
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+  }
+  .klat { display: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * { transition: none !important; }
+}

@@ -2,10 +2,111 @@
 <html lang="da">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <meta name="theme-color" content="#dfe7f5">
   <title>Klädd</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/styles.css">
 </head>
 <body>
-  <h1>Wuhu! Klädd virker!</h1>
+  <!-- Bløde farveklatter bag glasset, så frostet-effekten kan ses -->
+  <div class="baggrund" aria-hidden="true">
+    <span class="klat klat--1"></span>
+    <span class="klat klat--2"></span>
+    <span class="klat klat--3"></span>
+  </div>
+
+  <div class="app">
+    <!-- Lokation -->
+    <header class="topbar" id="topbar">
+      <button class="lokation" type="button" aria-label="Skift by, valgt: Kolding">
+        <span class="ikon ikon--pin"><img src="/assets/icons/pin.svg" alt=""></span>
+        <span class="lokation__by">Kolding</span>
+        <span class="ikon ikon--chevron"><img src="/assets/icons/chevron.svg" alt=""></span>
+      </button>
+      <p class="topbar__vejr">Nu · 8°</p>
+    </header>
+
+    <main class="indhold">
+      <!-- Tøjkort -->
+      <section class="kort glas tojkort" aria-labelledby="tojraad">
+        <p class="overskrift-lille">Dit tøjråd i dag</p>
+        <h1 class="tojkort__raad" id="tojraad">Tag regnjakke og hue på</h1>
+        <p class="hvorfor">
+          <span class="ikon ikon--info"><img src="/assets/icons/info.svg" alt=""></span>
+          <span>Føles som 3° pga. vind på 8 m/s</span>
+        </p>
+        <ul class="toj" role="list">
+          <li class="toj__vare">
+            <div class="billede billede--toj">
+              <img class="billede__kryds" src="/assets/icons/kryds-toj.svg" alt="">
+              <span class="billede__etiket">Tøj</span>
+            </div>
+            <span class="toj__navn">Regnjakke</span>
+          </li>
+          <li class="toj__vare">
+            <div class="billede billede--toj">
+              <img class="billede__kryds" src="/assets/icons/kryds-toj.svg" alt="">
+              <span class="billede__etiket">Tøj</span>
+            </div>
+            <span class="toj__navn">Hue</span>
+          </li>
+          <li class="toj__vare">
+            <div class="billede billede--toj">
+              <img class="billede__kryds" src="/assets/icons/kryds-toj.svg" alt="">
+              <span class="billede__etiket">Tøj</span>
+            </div>
+            <span class="toj__navn">Handsker</span>
+          </li>
+        </ul>
+      </section>
+
+      <!-- Tag med -->
+      <p class="tag-med glas glas--tonet">
+        <span class="ikon ikon--rain"><img src="/assets/icons/rain.svg" alt=""></span>
+        <span>Regn fra kl. 16 – tag jakken med hjem</span>
+      </p>
+
+      <!-- Tidslinje -->
+      <section class="dag" aria-labelledby="idag">
+        <h2 class="overskrift-lille" id="idag">I dag</h2>
+        <ol class="tidslinje glas" role="list">
+          <li class="time"><span class="time__kl">8</span><span class="billede billede--lille"><img class="billede__kryds" src="/assets/icons/kryds-billede.svg" alt=""></span><span class="time__grader">7°</span></li>
+          <li class="time"><span class="time__kl">10</span><span class="billede billede--lille"><img class="billede__kryds" src="/assets/icons/kryds-billede.svg" alt=""></span><span class="time__grader">8°</span></li>
+          <li class="time"><span class="time__kl">12</span><span class="billede billede--lille"><img class="billede__kryds" src="/assets/icons/kryds-billede.svg" alt=""></span><span class="time__grader">9°</span></li>
+          <li class="time"><span class="time__kl">14</span><span class="billede billede--lille"><img class="billede__kryds" src="/assets/icons/kryds-billede.svg" alt=""></span><span class="time__grader">9°</span></li>
+          <li class="time"><span class="time__kl">16</span><span class="ikon ikon--rain"><img src="/assets/icons/rain.svg" alt="Regn"></span><span class="time__grader">8°</span></li>
+          <li class="time"><span class="time__kl">18</span><span class="ikon ikon--rain"><img src="/assets/icons/rain.svg" alt="Regn"></span><span class="time__grader">6°</span></li>
+        </ol>
+      </section>
+
+      <!-- Opret profil – opfordring -->
+      <section class="kort glas opfordring" aria-labelledby="opfordring">
+        <h2 class="opfordring__titel" id="opfordring">Få råd, der passer til dig</h2>
+        <p class="opfordring__tekst">Fryser du let? Cykler du? Opret en profil på et minut.</p>
+        <button class="knap" type="button">Opret profil</button>
+      </section>
+    </main>
+
+    <!-- Fanebjælke -->
+    <nav class="fanebjaelke" aria-label="Hovedmenu">
+      <a class="fane" href="#" aria-current="page">
+        <span class="ikon ikon--home"><img src="/assets/icons/home.svg" alt=""></span>
+        <span class="fane__navn">Hjem</span>
+      </a>
+      <a class="fane" href="#">
+        <span class="ikon ikon--bookmark"><img src="/assets/icons/bookmark.svg" alt=""></span>
+        <span class="fane__navn">Steder</span>
+      </a>
+      <a class="fane" href="#">
+        <span class="ikon ikon--user"><img src="/assets/icons/user.svg" alt=""></span>
+        <span class="fane__navn">Profil</span>
+      </a>
+    </nav>
+  </div>
+
+  <script src="/app.js"></script>
 </body>
 </html>

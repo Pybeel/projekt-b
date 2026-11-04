@@ -4,7 +4,13 @@ const path = require('path'); // til at arbejde med filstier
 
 const PORT = 3000;
 const PUBLIC_DIR = path.join(__dirname, 'public');
-const MIME = { '.html': 'text/html', '.css': 'text/css', '.js': 'text/javascript' };
+const MIME = {
+  '.html': 'text/html',
+  '.css': 'text/css',
+  '.js': 'text/javascript',
+  '.svg': 'image/svg+xml',
+  '.png': 'image/png',
+};
 
 const server = http.createServer((req, res) => {
   // Fjern query string (?...) og afkod %-tegn, f.eks. %2e%2e -> ..
