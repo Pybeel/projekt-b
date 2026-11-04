@@ -1,15 +1,5 @@
 'use strict';
-/**
- * Klädd — back-end
- * --------------------------------------------------------------
- * En lille Node.js-server UDEN eksterne pakker (kun indbyggede moduler):
- *   - serverer front-enden (HTML, CSS, JS) fra mappen /public
- *   - tilbyder et REST-API til registrering, login og brugerpræferencer
- *   - gemmer brugere og sessioner i JSON-filer i mappen /data
- *
- * Start:  npm start   (eller: node server.js)
- * Åbn:    http://localhost:3000
- */
+
 const http = require('http');
 const fs = require('fs');
 const fsp = fs.promises;
