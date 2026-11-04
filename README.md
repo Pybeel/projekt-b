@@ -1,7 +1,6 @@
-# Klädd — hvad skal du have på i dag?
+# Klädd - hvad skal du have på i dag?
 
-En vejrapp med tøjråd. **Back-end:** Node.js-server på localhost (ingen eksterne pakker).
-**Front-end:** HTML, CSS og JavaScript (ES-moduler, ingen frameworks).
+En vejrapp med tøjråd!
 
 ## Kom i gang
 
@@ -9,7 +8,7 @@ En vejrapp med tøjråd. **Back-end:** Node.js-server på localhost (ingen ekste
 npm start          # eller: npm run dev  (genstarter selv, når server.js ændres)
 ```
 
-Åbn <http://localhost:3000>. Stop serveren med `Ctrl + C`. Der skal ikke køres `npm install`.
+Åbn <http://localhost:3000>.
 
 ## Opbygning
 
