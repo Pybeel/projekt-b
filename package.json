@@ -1,21 +1,12 @@
 {
-  "name": "projekt-b",
+  "name": "klaedd",
   "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
+  "description": "Klädd — vejrapp med tøjråd. Node.js-back-end og HTML/CSS/JS-front-end.",
+  "main": "server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "dev": "node --watch server.js"
   },
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/Pybeel/projekt-b.git"
-  },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
-  "type": "commonjs",
-  "bugs": {
-    "url": "https://github.com/Pybeel/projekt-b/issues"
-  },
-  "homepage": "https://github.com/Pybeel/projekt-b#readme"
+  "engines": { "node": ">=18" },
+  "license": "ISC"
 }

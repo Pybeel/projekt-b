@@ -3,9 +3,25 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Klädd</title>
+  <meta name="theme-color" content="#FFFFFF">
+  <title>Klädd — hvad skal du have på i dag?</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="css/style.css">
 </head>
 <body>
-  <h1>Wuhu! Klädd virker!</h1>
+  <div class="shell">
+    <!-- Hver skærm (01–11) tegnes ind her af js/app.js -->
+    <main id="app" class="screen" tabindex="-1"></main>
+
+    <!-- Bundmenu: Hjem · Steder · Profil -->
+    <nav id="nav" class="tabbar" aria-label="Hovedmenu" hidden></nav>
+  </div>
+
+  <!-- Korte beskeder, fx "Stedet er gemt" -->
+  <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+
+  <script type="module" src="js/app.js"></script>
 </body>
 </html>
