@@ -7,8 +7,23 @@ const PUBLIC_DIR = path.join(__dirname, 'public');
 const MIME = { '.html': 'text/html', '.css': 'text/css', '.js': 'text/javascript' };
 
 const server = http.createServer((req, res) => {
+  // Fjern query string (?...) og afkod %-tegn, f.eks. %2e%2e -> ..
+  let urlPath;
+  try {
+    urlPath = decodeURIComponent(req.url.split('?')[0]);
+  } catch {
+    res.writeHead(400);
+    return res.end('Ugyldig forespørgsel');
+  }
+
   // "/" betyder forsiden, altså index.html
-  const file = path.join(PUBLIC_DIR, req.url === '/' ? 'index.html' : req.url);
+  const file = path.resolve(PUBLIC_DIR, '.' + (urlPath === '/' ? '/index.html' : urlPath));
+
+  // Sikkerhed: afvis alt, der peger uden for public-mappen (f.eks. "../server.js")
+  if (!file.startsWith(PUBLIC_DIR + path.sep)) {
+    res.writeHead(403);
+    return res.end('Adgang nægtet');
+  }
 
   fs.readFile(file, (err, data) => {
     if (err) {
