@@ -10,6 +10,16 @@ npm start          # eller: npm run dev  (genstarter selv, når server.js ændre
 
 Åbn <http://localhost:3000>.
 
+## Test
+
+```bash
+npm test           # alle tests i tests/ (node:test, ingen ekstra pakker)
+```
+
+Hver testfil starter sin egen server fra en midlertidig kopi af `server.js` og `public/`, så `data/` i projektet aldrig bliver rørt.
+
+Om data: filerne i `data/` gemmes med rettighederne 0600, tokens gemmes kun som en hash (SHA-256), og er en datafil ødelagt, stopper serveren nu med en besked i stedet for at overskrive den.
+
 ## Opbygning
 
 ```
@@ -17,6 +27,7 @@ npm start          # eller: npm run dev  (genstarter selv, når server.js ændre
 ├── package.json
 ├── .gitignore           data/ kommer aldrig på GitHub
 ├── data/                oprettes automatisk: users.json, sessions.json
+├── tests/               npm test: API-tests mod en midlertidig kopi af serveren
 └── public/
     ├── index.html       skallen: <main id="app"> + bundmenu
     ├── css/style.css    alle farver og afstande som variabler øverst
