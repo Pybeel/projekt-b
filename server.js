@@ -14,6 +14,7 @@ const DATA_DIR = path.join(__dirname, 'data');
 const USERS_FILE = path.join(DATA_DIR, 'users.json');
 const SESSIONS_FILE = path.join(DATA_DIR, 'sessions.json');
 const SESSION_TTL = 1000 * 60 * 60 * 24 * 30; // 30 dage
+const MAX_SESSIONS = 10;                      // samtidige logins pr. bruger (de ældste smides ud)
 const MAX_BODY = 100 * 1024;                  // 100 kB
 const MAX_LOCATIONS = 12;
 const MIN_PASSWORD = 8;
@@ -71,7 +72,7 @@ const table = data => Object.assign(Object.create(null), data);
 
 const db = {
   users: table(readJson(USERS_FILE, {})),       // nøgle: brugernavn med små bogstaver
-  sessions: table(readJson(SESSIONS_FILE, {}))  // nøgle: token -> { username, created }
+  sessions: table(readJson(SESSIONS_FILE, {}))  // nøgle: sha256(token) -> { username, created }
 };
 
 // Skrivninger lægges i kø pr. fil, så to samtidige requests ikke ødelægger filen.
@@ -82,7 +83,7 @@ function writeJson(file, data) {
   const prev = queues.get(file) || Promise.resolve();
   const next = prev.then(async () => {
     const tmp = file + '.tmp';
-    await fsp.writeFile(tmp, json);
+    await fsp.writeFile(tmp, json, { mode: 0o600 });   // 0600: kun serverens egen bruger kan læse filen
     await fsp.rename(tmp, file);
   });
   queues.set(file, next.catch(err => console.error('Kunne ikke gemme', file, err)));
@@ -93,12 +94,7 @@ const saveSessions = () => writeJson(SESSIONS_FILE, db.sessions);
 
 // Sletter alle sessioner for et brugernavn
 function dropSessions(key) {
-  for (const [token, s] of Object.entries(db.sessions)) if (s.username === key) delete db.sessions[token];
-}
-
-// Ryd udløbne sessioner ved opstart
-for (const [token, s] of Object.entries(db.sessions)) {
-  if (Date.now() - s.created > SESSION_TTL) delete db.sessions[token];
+  for (const [id, s] of Object.entries(db.sessions)) if (s.username === key) delete db.sessions[id];
 }
 
 /* ============================================================
@@ -236,22 +232,35 @@ function readBody(req) {
   });
 }
 
-function createSession(username) {
+// I sessions.json gemmes kun en SHA-256 af tokenet, aldrig selve tokenet. Den, der får fat i
+// filen, kan altså ikke logge ind som andre: tokenet findes kun hos brugeren selv.
+const tokenId = token => crypto.createHash('sha256').update(token).digest('hex');
+
+async function createSession(username) {
   const token = crypto.randomBytes(32).toString('hex');
-  db.sessions[token] = { username, created: Date.now() };
-  saveSessions();
+  db.sessions[tokenId(token)] = { username, created: Date.now() };
+  // Højst MAX_SESSIONS pr. bruger, så filen ikke vokser for hvert login: de ældste ryger ud
+  const own = Object.entries(db.sessions)
+    .filter(([, s]) => s.username === username)
+    .sort((a, b) => a[1].created - b[1].created);
+  for (const [id] of own.slice(0, -MAX_SESSIONS)) delete db.sessions[id];
+  // Gemmes, før tokenet sendes: ellers kan sessionen gå tabt, hvis serveren stopper lige efter
+  await saveSessions();
   return token;
 }
 
 // Finder brugeren ud fra headeren "Authorization: Bearer <token>"
 function authUser(req) {
-  const m = /^Bearer\s+([a-f0-9]{64})$/i.exec(req.headers.authorization || '');
-  if (!m) return null;
-  const s = db.sessions[m[1]];
+  // Ordet "Bearer" må staves med store eller små bogstaver (det siger HTTP-standarden),
+  // men selve tokenet skal være præcis 64 hex-tegn med små bogstaver, som vi laver dem.
+  const m = /^(\S+)\s+([a-f0-9]{64})$/.exec(req.headers.authorization || '');
+  if (!m || m[1].toLowerCase() !== 'bearer') return null;
+  const id = tokenId(m[2]);
+  const s = db.sessions[id];
   if (!s) return null;
-  if (Date.now() - s.created > SESSION_TTL) { delete db.sessions[m[1]]; saveSessions(); return null; }
+  if (Date.now() - s.created > SESSION_TTL) { delete db.sessions[id]; saveSessions(); return null; }
   const user = db.users[s.username];
-  return user ? { user, token: m[1], key: s.username } : null;
+  return user ? { user, sessionId: id, key: s.username } : null;
 }
 
 /* ============================================================
@@ -301,7 +310,7 @@ async function handleApi(req, res, url) {
     // Gamle sessioner fra en tidligere profil med samme navn må ikke virke for den nye
     dropSessions(key);
     await saveUsers();
-    return sendJson(res, 201, { token: createSession(key), user: publicUser(user) });
+    return sendJson(res, 201, { token: await createSession(key), user: publicUser(user) });
   }
 
   if (method === 'POST' && pathname === '/api/login') {
@@ -322,7 +331,7 @@ async function handleApi(req, res, url) {
       throw httpError(401, 'Forkert brugernavn eller adgangskode', 'password');
     }
     loginAttempts.delete(limitKey);   // rigtig kode: tælleren starter forfra
-    return sendJson(res, 200, { token: createSession(key), user: publicUser(user) });
+    return sendJson(res, 200, { token: await createSession(key), user: publicUser(user) });
   }
 
   // ---- Alt herunder kræver login ----
@@ -331,7 +340,7 @@ async function handleApi(req, res, url) {
   const { user } = auth;
 
   if (method === 'POST' && pathname === '/api/logout') {
-    delete db.sessions[auth.token];
+    delete db.sessions[auth.sessionId];
     await saveSessions();
     return sendJson(res, 200, { ok: true });
   }
@@ -420,16 +429,25 @@ async function serveStatic(req, res, url) {
 }
 
 /* ============================================================
-   Oprydning — kører hvert 10. minut
+   Oprydning — ved opstart og derefter hvert 10. minut
    ============================================================ */
+function dropExpiredSessions() {
+  let changed = false;
+  for (const [id, s] of Object.entries(db.sessions)) {
+    if (Date.now() - s.created > SESSION_TTL) { delete db.sessions[id]; changed = true; }
+  }
+  if (changed) saveSessions();
+}
 function forgetOld(map, windowMs) {
   const now = Date.now();
   for (const [key, entry] of map) if (now - entry.start > windowMs) map.delete(key);
 }
 function cleanUp() {
+  dropExpiredSessions();
   forgetOld(loginAttempts, LOGIN_WINDOW);
   forgetOld(registrations, REGISTER_WINDOW);
 }
+cleanUp();
 // .unref(): timeren alene holder ikke serveren i gang
 setInterval(cleanUp, CLEANUP_INTERVAL).unref();
 

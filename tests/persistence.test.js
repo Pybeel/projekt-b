@@ -5,6 +5,7 @@
 
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
+const crypto = require('node:crypto');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
@@ -12,10 +13,12 @@ const { startServer } = require('./helpers');
 
 const DAY = 24 * 60 * 60 * 1000;
 const readJson = file => JSON.parse(fs.readFileSync(file, 'utf8'));
+/** sessions.json is keyed by sha256(token), never by the token itself. */
+const sid = token => crypto.createHash('sha256').update(token).digest('hex');
 
 /**
- * logout() is the one call that awaits the sessions.json write (register/login fire and forget),
- * and writes are queued in order, so after this the file reflects every session created so far.
+ * login and logout both await their sessions.json write, and writes to a file happen in order,
+ * so after this the file reflects every change made so far (e.g. the startup clean-up).
  */
 async function flushSessions(srv, username, password) {
   const { body } = await srv.api('POST', '/api/login', { body: { username, password } });
@@ -86,11 +89,18 @@ test('data files live in the temp copy and never contain the password', async ()
     assert.match(rec.salt, /^[a-f0-9]{32}$/);
     assert.match(rec.hash, /^[a-f0-9]{128}$/);
 
-    const sessions = readJson(srv.dataFile('sessions.json'));
-    assert.deepEqual(Object.keys(sessions), [u.token], 'only the register session is left (the flush session logged out)');
-    assert.equal(sessions[u.token].username, 'diskuser');
-    assert.equal(typeof sessions[u.token].created, 'number');
-    assert.ok(Math.abs(Date.now() - sessions[u.token].created) < 60_000);
+    const sessionsRaw = fs.readFileSync(srv.dataFile('sessions.json'), 'utf8');
+    assert.ok(!sessionsRaw.includes(u.token), 'the token itself is never written to disk');
+    const sessions = JSON.parse(sessionsRaw);
+    assert.deepEqual(Object.keys(sessions), [sid(u.token)], 'only the register session is left, keyed by sha256(token)');
+    assert.deepEqual(Object.keys(sessions[sid(u.token)]).sort(), ['created', 'username']);
+    assert.equal(sessions[sid(u.token)].username, 'diskuser');
+    assert.equal(typeof sessions[sid(u.token)].created, 'number');
+    assert.ok(Math.abs(Date.now() - sessions[sid(u.token)].created) < 60_000);
+
+    for (const name of ['users.json', 'sessions.json']) {
+      assert.equal((fs.statSync(srv.dataFile(name)).mode & 0o777).toString(8), '600', `${name} is only readable by its owner`);
+    }
 
     assert.deepEqual(fs.readdirSync(path.join(srv.dir, 'data')).sort(), ['sessions.json', 'users.json'], 'no .tmp files left behind');
   } finally {
@@ -129,14 +139,76 @@ test('sessions older than 30 days are dropped at startup; younger ones survive',
 
     const file = first.dataFile('sessions.json');
     const sessions = readJson(file);
-    sessions[u.token].created = Date.now() - 31 * DAY;
-    sessions[young].created = Date.now() - 29 * DAY;
+    sessions[sid(u.token)].created = Date.now() - 31 * DAY;
+    sessions[sid(young)].created = Date.now() - 29 * DAY;
     fs.writeFileSync(file, JSON.stringify(sessions));
 
     second = await startServer({ dir: first.dir });
+    await flushSessions(second, 'ttl', 'ttl-password');
+    assert.ok(!(sid(u.token) in readJson(file)), 'the expired session is removed from the file at startup');
+    assert.ok(sid(young) in readJson(file));
     assert.equal((await second.api('GET', '/api/me', { token: u.token })).status, 401, '31-day-old session expired');
     assert.equal((await second.api('GET', '/api/me', { token: young })).status, 200, '29-day-old session still valid');
     assert.equal((await second.api('POST', '/api/login', { body: { username: 'ttl', password: 'ttl-password' } })).status, 200);
+  } finally {
+    await first.stop();
+    if (second) await second.close();
+    else await first.close();
+  }
+});
+
+test('register and login answer only after their session is on disk (no token if it cannot be saved)', async () => {
+  const srv = await startServer();
+  try {
+    const u = await srv.register({ username: 'Durable', password: 'durable-pw' });
+    assert.ok(sid(u.token) in readJson(srv.dataFile('sessions.json')), 'register session written before the response');
+
+    // Make the next sessions.json write fail: the .tmp path is a directory
+    fs.mkdirSync(srv.dataFile('sessions.json.tmp'));
+    const failed = await srv.api('POST', '/api/login', { body: { username: 'durable', password: 'durable-pw' } });
+    assert.equal(failed.status, 500, 'a session that is not saved is not handed out');
+    assert.equal(failed.body.token, undefined);
+    fs.rmdirSync(srv.dataFile('sessions.json.tmp'));
+
+    const { body } = await srv.api('POST', '/api/login', { body: { username: 'durable', password: 'durable-pw' } });
+    assert.ok(sid(body.token) in readJson(srv.dataFile('sessions.json')), 'login session written before the response');
+  } finally {
+    await srv.close();
+  }
+});
+
+test('at most 10 sessions per user: a new login drops the oldest ones', async () => {
+  const srv = await startServer();
+  try {
+    const u = await srv.register({ username: 'Busy', password: 'busy-password' });
+    const other = await srv.register();
+    const tokens = [u.token];
+    for (let i = 0; i < 12; i++) {
+      tokens.push((await srv.api('POST', '/api/login', { body: { username: 'busy', password: 'busy-password' } })).body.token);
+    }
+    const status = async token => (await srv.api('GET', '/api/me', { token })).status;
+    for (const token of tokens.slice(0, 3)) assert.equal(await status(token), 401, 'the 3 oldest are gone');
+    for (const token of tokens.slice(3)) assert.equal(await status(token), 200, 'the 10 newest still work');
+    assert.equal(await status(other.token), 200, 'other users keep their sessions');
+    const onDisk = Object.values(readJson(srv.dataFile('sessions.json')));
+    assert.equal(onDisk.filter(s => s.username === 'busy').length, 10);
+  } finally {
+    await srv.close();
+  }
+});
+
+test('sessions saved before tokens were hashed (keyed by the plain token) no longer work', async () => {
+  // One-time effect of the upgrade: everybody has to log in again.
+  const first = await startServer();
+  let second;
+  try {
+    await first.register({ username: 'OldTimer', password: 'old-timer-pw' });
+    await first.stop();
+    const plain = crypto.randomBytes(32).toString('hex');
+    fs.writeFileSync(first.dataFile('sessions.json'), JSON.stringify({ [plain]: { username: 'oldtimer', created: Date.now() } }));
+    second = await startServer({ dir: first.dir });
+    assert.equal((await second.api('GET', '/api/me', { token: plain })).status, 401);
+    assert.equal((await second.api('POST', '/api/login', { body: { username: 'oldtimer', password: 'old-timer-pw' } })).status, 200);
   } finally {
     await first.stop();
     if (second) await second.close();
