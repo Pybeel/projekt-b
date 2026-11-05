@@ -79,13 +79,22 @@ describe('POST /api/me/locations', () => {
     assert.equal(loc.country, 'C'.repeat(60));
   });
 
-  test('the default label is the whole name, NOT capped at 30 (only a given label is capped)', async () => {
-    // Current behaviour, pinned: cleanLabel() caps the given label but returns the fallback
-    // (the name, up to 80 chars) as-is. Same for rename with an empty label.
+  test('the default label (the name) is capped at 30 too; the name itself keeps up to 80', async () => {
+    // The label is shown in a narrow chip on the home screen. (Used to be: a long name became an uncapped label.)
     const u = await srv.register();
     const loc = await add(u.token, { name: 'N'.repeat(50), lat: 0.5, lon: 0.5 });
     assert.equal(loc.name, 'N'.repeat(50));
-    assert.equal(loc.label, 'N'.repeat(50));
+    assert.equal(loc.label, 'N'.repeat(30));
+  });
+
+  test('a label that is not a string falls back to the name; non-string region/country become ""', async () => {
+    const u = await srv.register();
+    for (const label of [{}, ['Hjem'], 42, true]) {
+      const loc = await add(u.token, { ...KOLDING, label, region: ['x'], country: { a: 1 } });
+      assert.equal(loc.label, 'Kolding', JSON.stringify(label));
+      assert.equal(loc.region, '');
+      assert.equal(loc.country, '');
+    }
   });
 
   test('rounds lat/lon to 4 decimals', async () => {
@@ -104,12 +113,16 @@ describe('POST /api/me/locations', () => {
     }
   });
 
-  test('numeric strings are coerced to numbers', async () => {
-    // Current behaviour, pinned (the frontend sends numbers).
+  test('coordinates must be JSON numbers: numeric strings like "55.5" or "0x10" are refused', async () => {
+    // Used to be coerced with Number(). The frontend always sends numbers (Open-Meteo results
+    // and navigator.geolocation), so strings only come from hand-made requests.
     const u = await srv.register();
-    const loc = await add(u.token, { name: 'Strings', lat: '55.5', lon: '12' });
-    assert.equal(loc.lat, 55.5);
-    assert.equal(loc.lon, 12);
+    for (const [lat, lon] of [['55.5', '12'], ['0x10', 10], [10, '1e1'], [' 5 ', 5]]) {
+      const res = await addRaw(u.token, { name: 'Strings', lat, lon });
+      assert.equal(res.status, 400, `lat=${JSON.stringify(lat)} lon=${JSON.stringify(lon)}`);
+      assert.deepEqual(res.body, { error: MSG.badLocation });
+    }
+    assert.deepEqual(await locationsOf(u.token), []);
   });
 
   test('400 "Ugyldigt sted." for out-of-range, missing or non-numeric coordinates and missing names', async () => {
@@ -136,9 +149,7 @@ describe('POST /api/me/locations', () => {
     assert.deepEqual(await locationsOf(u.token), []);
   });
 
-  test('null, empty-string or boolean coordinates are rejected instead of becoming 0', {
-    todo: 'sanitizeLocation uses Number(x): null, "", false, true and [] coerce to 0/1, so { lat: null, lon: null } is saved as 0,0 (Null Island) with 201'
-  }, async () => {
+  test('null, empty-string, boolean or array coordinates are rejected instead of becoming 0 (Null Island)', async () => {
     const u = await srv.register();
     for (const [lat, lon] of [[null, null], ['', ''], [true, false], [[], []]]) {
       const res = await addRaw(u.token, { name: 'Bad', lat, lon });
@@ -146,14 +157,17 @@ describe('POST /api/me/locations', () => {
     }
   });
 
-  test('a non-string name (object/array) is rejected instead of being stored as "[object Object]"', {
-    todo: 'sanitizeLocation uses String(src.name): { name: {} } is saved with name and label "[object Object]"'
-  }, async () => {
+  test('a non-string name (object/array/number) is rejected instead of being stored as "[object Object]"', async () => {
     const u = await srv.register();
-    for (const name of [{ x: 1 }, ['a', 'b']]) {
+    for (const name of [{ x: 1 }, ['a', 'b'], 42]) {
       const res = await addRaw(u.token, { name, lat: 1, lon: 1 });
       assert.equal(res.status, 400, `${JSON.stringify(name)} -> ${res.status} ${res.text}`);
     }
+    // String() throws on this one, which used to be a 500
+    const res = await addRaw(u.token, '{"name":{"toString":1},"lat":1,"lon":1}');
+    assert.equal(res.status, 400, res.text);
+    assert.deepEqual(res.body, { error: MSG.badLocation });
+    assert.deepEqual(await locationsOf(u.token), []);
   });
 
   test('at most MAX_LOCATIONS = 12; the 13th is refused, and deleting one frees a slot', async () => {
@@ -198,6 +212,15 @@ describe('PUT /api/me/locations/:id (rename)', () => {
     const loc = await add(u.token);
     const res = await rename(u.token, loc.id, { label: '   ' + 'z'.repeat(45) });
     assert.equal(res.body.user.locations[0].label, 'z'.repeat(30));
+  });
+
+  test('renaming with an empty label uses the name, capped at 30', async () => {
+    const u = await srv.register();
+    const loc = await add(u.token, { name: 'Long'.repeat(10), label: 'Kort', lat: 1, lon: 1 });
+    const res = await rename(u.token, loc.id, { label: '' });
+    assert.equal(res.body.user.locations[0].label, 'Long'.repeat(10).slice(0, 30));
+    const obj = await rename(u.token, loc.id, { label: { text: 'x' } });
+    assert.equal(obj.body.user.locations[0].label, 'Long'.repeat(10).slice(0, 30), 'a non-string label is treated as empty');
   });
 
   test('an empty or missing label resets it to the name', async () => {

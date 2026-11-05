@@ -166,6 +166,11 @@ const AGE_GROUPS = ['under12', '12-17', '18-29', '30-49', '50+'];
 const COLD = ['fryser', 'normal', 'varm'];
 const TRANSPORT = ['cykel', 'gaar', 'offentlig', 'bil'];
 
+// Kun rigtige tekster og tal tæller. Number(x) gør null, "" og [] til 0, og String(x) gør
+// ["a","b"] til "a,b" og {} til "[object Object]" (og { toString: 1 } får String() til at kaste).
+const str = v => (typeof v === 'string' ? v : '');
+const num = v => (typeof v === 'number' && Number.isFinite(v) ? v : NaN);
+
 function defaultProfile() {
   return {
     displayName: '',
@@ -194,23 +199,24 @@ function sanitizeProfile(input, current = defaultProfile()) {
   return p;
 }
 
+// Mærkatet vises i en smal "chip" på forsiden, så det er højst 30 tegn, også når bynavnet
+// bruges i stedet for et tomt felt
 function cleanLabel(value, fallback) {
-  const label = String(value || '').trim().slice(0, 30);
-  return label || fallback;
+  return (str(value).trim() || fallback).slice(0, 30);
 }
 
 function sanitizeLocation(input) {
   const src = input && typeof input === 'object' ? input : {};
-  const lat = Number(src.lat), lon = Number(src.lon);
+  const lat = num(src.lat), lon = num(src.lon);   // front-enden sender altid rigtige tal
   if (!Number.isFinite(lat) || !Number.isFinite(lon) || Math.abs(lat) > 90 || Math.abs(lon) > 180) return null;
-  const name = String(src.name || '').trim().slice(0, 80);
+  const name = str(src.name).trim().slice(0, 80);
   if (!name) return null;
   return {
     id: crypto.randomBytes(6).toString('hex'),
     label: cleanLabel(src.label, name),   // fx "Hjem", "Campus", "Job"
     name,                                  // fx "Kolding"
-    region: String(src.region || '').trim().slice(0, 80),
-    country: String(src.country || '').trim().slice(0, 60),
+    region: str(src.region).trim().slice(0, 80),
+    country: str(src.country).trim().slice(0, 60),
     lat: Math.round(lat * 1e4) / 1e4,
     lon: Math.round(lon * 1e4) / 1e4
   };
@@ -311,8 +317,8 @@ async function handleApi(req, res, url) {
 
   if (method === 'POST' && pathname === '/api/register') {
     const body = await readBody(req);
-    const username = String(body.username || '').trim();
-    const password = String(body.password || '');
+    const username = str(body.username).trim();
+    const password = str(body.password);
     if (!/^[a-zA-Z0-9_.-]{3,24}$/.test(username)) {
       throw httpError(400, 'Brugernavnet skal være 3–24 tegn (bogstaver, tal og . _ -).', 'username');
     }
@@ -346,7 +352,7 @@ async function handleApi(req, res, url) {
 
   if (method === 'POST' && pathname === '/api/login') {
     const body = await readBody(req);
-    const key = String(body.username || '').trim().toLowerCase();
+    const key = str(body.username).trim().toLowerCase();
     // Grænsen gælder pr. IP + brugernavn, så en angriber ikke kan låse den rigtige bruger ude.
     // Forsøget tælles, FØR koden tjekkes, så 100 samtidige gæt heller ikke slipper igennem.
     // (Brugernavnet kortes til 24 tegn — længere navne findes ikke, og nøglen skal være lille.)
@@ -356,7 +362,7 @@ async function handleApi(req, res, url) {
     }
     const user = db.users[key];
     const { salt, hash } = user || NO_USER;
-    const ok = await verifyPassword(String(body.password || ''), salt, hash);
+    const ok = await verifyPassword(str(body.password), salt, hash);
     // Profilen kan være slettet, mens koden blev tjekket
     if (!user || !ok || db.users[key] !== user) {
       throw httpError(401, 'Forkert brugernavn eller adgangskode', 'password');

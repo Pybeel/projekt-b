@@ -84,6 +84,19 @@ describe('POST /api/register', () => {
     }
   });
 
+  test('username and password must be JSON strings (no arrays or numbers turned into text)', async () => {
+    for (const [body, field] of [
+      [{ username: ['arrayname'], password: 'password1' }, 'username'],
+      [{ username: 12345, password: 'password1' }, 'username'],
+      [{ username: 'arraypw', password: ['password1'] }, 'password'],
+      [{ username: 'numberpw', password: 123456789 }, 'password']
+    ]) {
+      const res = await register(body);
+      assert.equal(res.status, 400, JSON.stringify(body));
+      assert.equal(res.body.field, field, JSON.stringify(body));
+    }
+  });
+
   test('accepts the boundary lengths 3 and 24 and the characters . _ -', async () => {
     for (const username of ['abc', 'x'.repeat(24), 'a.b_c-D9']) {
       const res = await register({ username, password: 'password1' });
@@ -234,6 +247,19 @@ describe('POST /api/login', () => {
     // Without the dummy hash an unknown user is answered in ~1 ms, a wrong password in 20+ ms.
     assert.ok(median(unknown) > median(known) / 3,
       `unknown user ${median(unknown).toFixed(1)} ms vs wrong password ${median(known).toFixed(1)} ms`);
+  });
+
+  test('401 when username or password is an array or object, even if it stringifies to the right value', async () => {
+    // String(["LoginUser"]) === "LoginUser", so this used to log in
+    for (const body of [
+      { username: ['LoginUser'], password: 'right-password' },
+      { username: 'LoginUser', password: ['right-password'] },
+      { username: { toString: 'x' }, password: 'right-password' }
+    ]) {
+      const res = await login(body);
+      assert.equal(res.status, 401, JSON.stringify(body));
+      assert.deepEqual(res.body, { error: MSG.badLogin, field: 'password' });
+    }
   });
 
   test('401 for an empty body or missing fields', async () => {
