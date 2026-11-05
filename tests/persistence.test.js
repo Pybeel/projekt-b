@@ -166,18 +166,86 @@ test('the usernames __proto__ and constructor survive a restart like any other a
   }
 });
 
-test('missing data files start an empty database; a corrupt users.json is silently treated as empty', async () => {
-  // Current behaviour, pinned: readJson() falls back to {} on any parse error and the next
-  // save overwrites the corrupt file, so every existing account is lost without a warning.
+test('missing data files start an empty database', async () => {
+  const srv = await startServer();
+  try {
+    assert.deepEqual(fs.readdirSync(path.join(srv.dir, 'data')), [], 'nothing is written until something changes');
+    const u = await srv.register({ username: 'FirstEver' });
+    assert.equal((await srv.api('GET', '/api/me', { token: u.token })).status, 200);
+  } finally {
+    await srv.close();
+  }
+});
+
+test('a corrupt or unreadable data file stops the server with a Danish message and is left untouched', async () => {
   const first = await startServer();
   let second;
   try {
+    await first.register({ username: 'Keeper', password: 'keeper-pw' });
+    await flushSessions(first, 'keeper', 'keeper-pw');
     await first.stop();
-    fs.writeFileSync(first.dataFile('users.json'), '{"halfwritten": {');
+    const goodUsers = fs.readFileSync(first.dataFile('users.json'), 'utf8');
+
+    for (const [name, content] of [
+      ['users.json', '{"halfwritten": {'],
+      ['users.json', ''],
+      ['users.json', 'null'],
+      ['users.json', '[1, 2]'],
+      ['sessions.json', '{bad json'],
+      ['users.json', null]                   // a directory: readFileSync fails with EISDIR
+    ]) {
+      const file = first.dataFile(name);
+      const original = fs.readFileSync(file, 'utf8');
+      fs.rmSync(file, { recursive: true });
+      if (content === null) fs.mkdirSync(file); else fs.writeFileSync(file, content);
+
+      const err = await startServer({ dir: first.dir }).then(
+        srv => { srv.close(); assert.fail(`${name} = ${JSON.stringify(content)}: the server started`); },
+        e => e
+      );
+      const what = `${name} = ${JSON.stringify(content)}`;
+      assert.equal(err.code, 1, what);
+      assert.ok(err.logs.stderr.includes(file), `${what}: the message names the file\n${err.logs.stderr}`);
+      assert.match(err.logs.stderr, content === null ? /kan ikke læses \(EISDIR\)/ : /er ødelagt/, what);
+      assert.match(err.logs.stderr, /Serveren starter ikke/, what);
+      if (content !== null) assert.equal(fs.readFileSync(file, 'utf8'), content, `${what}: file left as it was`);
+
+      fs.rmSync(file, { recursive: true });
+      fs.writeFileSync(file, original);
+    }
+
+    assert.equal(fs.readFileSync(first.dataFile('users.json'), 'utf8'), goodUsers);
     second = await startServer({ dir: first.dir });
-    const u = await second.register({ username: 'AfterCorrupt' });
-    assert.equal((await second.api('GET', '/api/me', { token: u.token })).status, 200);
-    assert.deepEqual(Object.keys(readJson(second.dataFile('users.json'))), ['aftercorrupt']);
+    const login = await second.api('POST', '/api/login', { body: { username: 'keeper', password: 'keeper-pw' } });
+    assert.equal(login.status, 200, 'with the files repaired, the account is still there');
+  } finally {
+    await first.stop();
+    if (second) await second.close();
+    else await first.close();
+  }
+});
+
+test('re-registering a username does not revive sessions left over from an old account with that name', async () => {
+  const first = await startServer();
+  let second;
+  try {
+    const old = await first.register({ username: 'Ghost', password: 'old-password' });
+    await flushSessions(first, 'ghost', 'old-password');
+    await first.stop();
+    // The account disappears from users.json (restored backup, manual edit, ...) but its session stays
+    const users = readJson(first.dataFile('users.json'));
+    delete users.ghost;
+    fs.writeFileSync(first.dataFile('users.json'), JSON.stringify(users));
+
+    second = await startServer({ dir: first.dir });
+    assert.equal((await second.api('GET', '/api/me', { token: old.token })).status, 401);
+    const fresh = await second.register({ username: 'ghost', password: 'new-password' });
+    assert.equal((await second.api('GET', '/api/me', { token: old.token })).status, 401, 'old token must not log into the new account');
+    assert.equal((await second.api('GET', '/api/me', { token: fresh.token })).status, 200);
+
+    await flushSessions(second, 'ghost', 'new-password');
+    const left = Object.values(readJson(second.dataFile('sessions.json'))).filter(s => s.username === 'ghost');
+    assert.equal(left.length, 1, 'only the new session is left for "ghost"');
   } finally {
     await first.stop();
     if (second) await second.close();

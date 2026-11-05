@@ -42,9 +42,26 @@ const MIME = {
    ============================================================ */
 fs.mkdirSync(DATA_DIR, { recursive: true });
 
+// Kun en fil, der ikke findes endnu, giver en tom database. Er filen ødelagt, stopper serveren
+// hellere end at starte med en tom database: det næste gem ville ellers overskrive alle profiler.
 function readJson(file, fallback) {
-  try { return JSON.parse(fs.readFileSync(file, 'utf8')); }
-  catch { return fallback; }
+  let text;
+  try { text = fs.readFileSync(file, 'utf8'); }
+  catch (err) {
+    if (err.code === 'ENOENT') return fallback;
+    refuseToStart(file, `kan ikke læses (${err.code || err.message})`);
+  }
+  let data = null;
+  try { data = JSON.parse(text); } catch { /* håndteres lige herunder */ }
+  if (!data || typeof data !== 'object' || Array.isArray(data)) refuseToStart(file, 'er ødelagt (ikke et gyldigt JSON-objekt)');
+  return data;
+}
+
+function refuseToStart(file, problem) {
+  console.error(`\n  ${file} ${problem}.`);
+  console.error('  Serveren starter ikke, så filen ikke bliver overskrevet. Ret filen, gendan en kopi,');
+  console.error('  eller slet den, hvis dataene i den må gå tabt.\n');
+  process.exit(1);
 }
 
 // Tabellerne er objekter uden prototype (Object.create(null)). I et almindeligt {} findes
@@ -73,6 +90,11 @@ function writeJson(file, data) {
 }
 const saveUsers = () => writeJson(USERS_FILE, db.users);
 const saveSessions = () => writeJson(SESSIONS_FILE, db.sessions);
+
+// Sletter alle sessioner for et brugernavn
+function dropSessions(key) {
+  for (const [token, s] of Object.entries(db.sessions)) if (s.username === key) delete db.sessions[token];
+}
 
 // Ryd udløbne sessioner ved opstart
 for (const [token, s] of Object.entries(db.sessions)) {
@@ -276,6 +298,8 @@ async function handleApi(req, res, url) {
       locations: []
     };
     db.users[key] = user;
+    // Gamle sessioner fra en tidligere profil med samme navn må ikke virke for den nye
+    dropSessions(key);
     await saveUsers();
     return sendJson(res, 201, { token: createSession(key), user: publicUser(user) });
   }
@@ -318,7 +342,7 @@ async function handleApi(req, res, url) {
 
   if (method === 'DELETE' && pathname === '/api/me') {
     delete db.users[auth.key];
-    for (const [token, s] of Object.entries(db.sessions)) if (s.username === auth.key) delete db.sessions[token];
+    dropSessions(auth.key);
     await Promise.all([saveUsers(), saveSessions()]);
     return sendJson(res, 200, { ok: true });
   }
