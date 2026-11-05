@@ -217,6 +217,25 @@ describe('POST /api/login', () => {
     assert.deepEqual(res.body, { error: MSG.badLogin, field: 'password' });
   });
 
+  test('an unknown username takes about as long as a wrong password (the password is always hashed)', async () => {
+    const u = await srv.register({ password: 'timing-password' });
+    const timed = async body => {
+      const start = process.hrtime.bigint();
+      const res = await login(body);
+      assert.equal(res.status, 401);
+      return Number(process.hrtime.bigint() - start) / 1e6;
+    };
+    const known = [], unknown = [];
+    for (let i = 0; i < 5; i++) {
+      known.push(await timed({ username: u.username, password: `wrong-${i}` }));
+      unknown.push(await timed({ username: `ghost_${i}`, password: 'wrong-password' }));
+    }
+    const median = list => list.sort((a, b) => a - b)[2];
+    // Without the dummy hash an unknown user is answered in ~1 ms, a wrong password in 20+ ms.
+    assert.ok(median(unknown) > median(known) / 3,
+      `unknown user ${median(unknown).toFixed(1)} ms vs wrong password ${median(known).toFixed(1)} ms`);
+  });
+
   test('401 for an empty body or missing fields', async () => {
     for (const body of [{}, { username: 'LoginUser' }, { password: 'right-password' }]) {
       const res = await login(body);

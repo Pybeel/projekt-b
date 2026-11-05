@@ -5,6 +5,7 @@ const fs = require('fs');
 const fsp = fs.promises;
 const path = require('path');
 const crypto = require('crypto');
+const util = require('util');
 
 const PORT = Number(process.env.PORT) || 3000;
 const HOST = process.env.HOST || 'localhost';
@@ -16,6 +17,15 @@ const SESSION_TTL = 1000 * 60 * 60 * 24 * 30; // 30 dage
 const MAX_BODY = 100 * 1024;                  // 100 kB
 const MAX_LOCATIONS = 12;
 const MIN_PASSWORD = 8;
+
+// Grænser mod gætteri af adgangskoder og masseoprettelse af profiler (se "Begrænsning af forsøg").
+// Miljøvariablerne findes KUN til testene, som opretter hundredvis af brugere fra samme IP
+// (127.0.0.1). Sæt dem ikke, når appen kører for rigtigt.
+const LOGIN_MAX_FAILS = Number(process.env.LOGIN_MAX_FAILS) || 5;  // forkerte logins pr. IP + brugernavn …
+const LOGIN_WINDOW = 1000 * 60 * 15;                               // … pr. 15 min
+const REGISTER_MAX = Number(process.env.REGISTER_MAX) || 20;       // nye profiler pr. IP …
+const REGISTER_WINDOW = 1000 * 60 * 60;                            // … pr. time
+const CLEANUP_INTERVAL = 1000 * 60 * 10;                           // oprydning hvert 10. minut
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -72,14 +82,42 @@ for (const [token, s] of Object.entries(db.sessions)) {
 /* ============================================================
    Adgangskoder — hashes med scrypt + salt (aldrig i klartekst)
    ============================================================ */
-function hashPassword(password, salt = crypto.randomBytes(16).toString('hex')) {
-  return { salt, hash: crypto.scryptSync(password, salt, 64).toString('hex') };
+// scrypt er med vilje langsom (ca. 20 ms). Den asynkrone udgave regner i en baggrundstråd, så
+// serveren kan svare andre imens. scryptSync fik alle andre requests til at vente i køen.
+const scrypt = util.promisify(crypto.scrypt);
+
+async function hashPassword(password, salt = crypto.randomBytes(16).toString('hex')) {
+  return { salt, hash: (await scrypt(password, salt, 64)).toString('hex') };
 }
-function verifyPassword(password, salt, hash) {
-  const a = crypto.scryptSync(password, salt, 64);
+async function verifyPassword(password, salt, hash) {
+  const a = await scrypt(password, salt, 64);
   const b = Buffer.from(hash, 'hex');
   return a.length === b.length && crypto.timingSafeEqual(a, b);
 }
+
+// Bruges ved login, når brugernavnet ikke findes: koden tjekkes alligevel (og passer aldrig).
+// Så tager "ukendt bruger" lige så lang tid som "forkert kode", og man kan ikke måle sig
+// frem til, hvilke brugernavne der findes.
+const NO_USER = { salt: '0'.repeat(32), hash: '0'.repeat(128) };
+
+/* ============================================================
+   Begrænsning af forsøg — mod gætteri af adgangskoder og spam
+   ============================================================ */
+// Huskes kun i hukommelsen (nøgle -> { count, start }) og glemmes ved genstart. Det er fint.
+const loginAttempts = new Map();   // nøgle: "IP brugernavn"
+const registrations = new Map();   // nøgle: IP
+
+// Tæller ét forsøg og svarer true, hvis der nu er for mange i det aktuelle tidsvindue
+function overLimit(map, key, max, windowMs) {
+  const now = Date.now();
+  let entry = map.get(key);
+  if (!entry || now - entry.start > windowMs) map.set(key, entry = { count: 0, start: now });
+  entry.count++;
+  return entry.count > max;
+}
+
+// NB: bag en proxy (fx hos en hostingtjeneste) er det proxyens IP, og så deler alle brugerne grænsen
+const clientIp = req => req.socket.remoteAddress || '';
 
 /* ============================================================
    Profil og præferencer (skærm 06–08 og 10)
@@ -224,8 +262,13 @@ async function handleApi(req, res, url) {
     }
     const key = username.toLowerCase();
     if (db.users[key]) throw httpError(409, 'Brugernavnet er optaget.', 'username');
+    if (overLimit(registrations, clientIp(req), REGISTER_MAX, REGISTER_WINDOW)) {
+      throw httpError(429, 'For mange nye profiler på kort tid. Prøv igen senere.');
+    }
 
-    const { salt, hash } = hashPassword(password);
+    const { salt, hash } = await hashPassword(password);
+    // Mens koden blev hashet, kan en anden have nået at oprette samme navn: tjek igen
+    if (db.users[key]) throw httpError(409, 'Brugernavnet er optaget.', 'username');
     const user = {
       username, salt, hash,
       createdAt: new Date().toISOString(),
@@ -240,10 +283,21 @@ async function handleApi(req, res, url) {
   if (method === 'POST' && pathname === '/api/login') {
     const body = await readBody(req);
     const key = String(body.username || '').trim().toLowerCase();
+    // Grænsen gælder pr. IP + brugernavn, så en angriber ikke kan låse den rigtige bruger ude.
+    // Forsøget tælles, FØR koden tjekkes, så 100 samtidige gæt heller ikke slipper igennem.
+    // (Brugernavnet kortes til 24 tegn — længere navne findes ikke, og nøglen skal være lille.)
+    const limitKey = clientIp(req) + ' ' + key.slice(0, 24);
+    if (overLimit(loginAttempts, limitKey, LOGIN_MAX_FAILS, LOGIN_WINDOW)) {
+      throw httpError(429, 'For mange forsøg. Prøv igen om lidt.', 'password');
+    }
     const user = db.users[key];
-    if (!user || !verifyPassword(String(body.password || ''), user.salt, user.hash)) {
+    const { salt, hash } = user || NO_USER;
+    const ok = await verifyPassword(String(body.password || ''), salt, hash);
+    // Profilen kan være slettet, mens koden blev tjekket
+    if (!user || !ok || db.users[key] !== user) {
       throw httpError(401, 'Forkert brugernavn eller adgangskode', 'password');
     }
+    loginAttempts.delete(limitKey);   // rigtig kode: tælleren starter forfra
     return sendJson(res, 200, { token: createSession(key), user: publicUser(user) });
   }
 
@@ -340,6 +394,20 @@ async function serveStatic(req, res, url) {
     res.end('Ikke fundet');
   }
 }
+
+/* ============================================================
+   Oprydning — kører hvert 10. minut
+   ============================================================ */
+function forgetOld(map, windowMs) {
+  const now = Date.now();
+  for (const [key, entry] of map) if (now - entry.start > windowMs) map.delete(key);
+}
+function cleanUp() {
+  forgetOld(loginAttempts, LOGIN_WINDOW);
+  forgetOld(registrations, REGISTER_WINDOW);
+}
+// .unref(): timeren alene holder ikke serveren i gang
+setInterval(cleanUp, CLEANUP_INTERVAL).unref();
 
 /* ============================================================
    Selve serveren

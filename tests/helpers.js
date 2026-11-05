@@ -21,6 +21,10 @@ const HOST = '127.0.0.1';
 const READY_LINE = 'Klädd kører på';
 const START_TIMEOUT = 10_000;
 const ORPHAN_GUARD = path.join(__dirname, 'orphan-guard.js');
+// server.js limits logins per IP + username and registrations per IP. The suite registers
+// hundreds of users from 127.0.0.1, so test servers get generous limits unless a test asks for
+// the real ones with startServer({ realLimits: true }).
+const TEST_LIMITS = { LOGIN_MAX_FAILS: '1000', REGISTER_MAX: '100000' };
 
 const liveChildren = new Set();
 const tempDirs = new Set();
@@ -64,11 +68,13 @@ function freePort() {
   });
 }
 
-function spawnServer(dir, port) {
+function spawnServer(dir, port, realLimits) {
+  const env = { ...process.env, ...TEST_LIMITS, PORT: String(port), HOST };
+  if (realLimits) for (const name of Object.keys(TEST_LIMITS)) delete env[name];
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, ['--require', ORPHAN_GUARD, 'server.js'], {
       cwd: dir,
-      env: { ...process.env, PORT: String(port), HOST },
+      env,
       stdio: ['ignore', 'pipe', 'pipe']
     });
     liveChildren.add(child);
@@ -105,16 +111,17 @@ function spawnServer(dir, port) {
 
 /**
  * Start a server. Pass { dir } to reuse an existing app dir (restart / persistence tests),
- * { port } to force a port (no retry if it is taken).
+ * { port } to force a port (no retry if it is taken), { realLimits: true } for server.js's own
+ * login/registration limits instead of TEST_LIMITS.
  * If the process exits before it is ready, the promise rejects with { logs, code, signal }.
  * Returns a handle: { dir, port, base, child, logs, api(), register(), raw(), isAlive(), stop(), close() }.
  */
-async function startServer({ dir = makeAppDir(), port: fixedPort } = {}) {
+async function startServer({ dir = makeAppDir(), port: fixedPort, realLimits = false } = {}) {
   let started;
   for (let attempt = 1; !started; attempt++) {
     const port = fixedPort ?? await freePort();
     try {
-      started = { port, ...(await spawnServer(dir, port)) };
+      started = { port, ...(await spawnServer(dir, port, realLimits)) };
     } catch (err) {
       // Someone grabbed the port between freePort() and listen(): try another one.
       if (fixedPort === undefined && attempt < 3 && /EADDRINUSE/.test(err.logs?.stderr || '')) continue;
@@ -286,7 +293,9 @@ const MSG = {
   tooManyLocations: 'Du kan højst gemme 12 steder.',
   orderMissing: 'Rækkefølgen mangler.',
   locationNotFound: 'Stedet findes ikke.',
-  badAddress: 'Ugyldig adresse.'
+  badAddress: 'Ugyldig adresse.',
+  tooManyLogins: 'For mange forsøg. Prøv igen om lidt.',
+  tooManyRegistrations: 'For mange nye profiler på kort tid. Prøv igen senere.'
 };
 
 module.exports.MSG = MSG;
