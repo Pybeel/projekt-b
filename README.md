@@ -32,7 +32,7 @@ Om data: filerne i `data/` gemmes med rettighederne 0600, tokens gemmes kun som 
     ├── index.html       skallen: <main id="app"> + bundmenu
     ├── css/style.css    alle farver og afstande som variabler øverst
     └── js/
-        ├── app.js       skærmene 01–11, navigation og knapper
+        ├── app.js       skærm 01–11, navigation og knapper
         ├── api.js       kald til vores egen server
         ├── weather.js   Open-Meteo: vejr, bysøgning, geolokalisering
         ├── clothing.js  tøjmotoren (reglerne for tøjråd)
