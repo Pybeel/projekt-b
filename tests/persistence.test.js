@@ -216,6 +216,35 @@ test('sessions saved before tokens were hashed (keyed by the plain token) no lon
   }
 });
 
+test('a register whose users.json write fails is rolled back: 500 now, and the name is still free', async () => {
+  const first = await startServer();
+  let second;
+  try {
+    await first.register({ username: 'Existing', password: 'existing-pw' });
+    fs.mkdirSync(first.dataFile('users.json.tmp'));   // the next users.json write fails (EISDIR)
+    const failed = await first.api('POST', '/api/register', { body: { username: 'Unlucky', password: 'unlucky-pw' } });
+    assert.equal(failed.status, 500);
+    assert.deepEqual(failed.body, { error: 'Der skete en fejl på serveren.' });
+    assert.match(first.logs.stderr, /Kunne ikke gemme/);
+    assert.equal((await first.api('POST', '/api/login', { body: { username: 'unlucky', password: 'unlucky-pw' } })).status, 401,
+      'the account does not exist in memory either');
+    fs.rmdirSync(first.dataFile('users.json.tmp'));
+
+    const retry = await first.api('POST', '/api/register', { body: { username: 'Unlucky', password: 'unlucky-pw' } });
+    assert.equal(retry.status, 201, 'retrying works instead of answering 409');
+    await first.stop();
+
+    second = await startServer({ dir: first.dir });
+    for (const [username, password] of [['unlucky', 'unlucky-pw'], ['existing', 'existing-pw']]) {
+      assert.equal((await second.api('POST', '/api/login', { body: { username, password } })).status, 200, username);
+    }
+  } finally {
+    await first.stop();
+    if (second) await second.close();
+    else await first.close();
+  }
+});
+
 test('the usernames __proto__ and constructor survive a restart like any other account', async () => {
   const first = await startServer();
   let second;

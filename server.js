@@ -75,20 +75,42 @@ const db = {
   sessions: table(readJson(SESSIONS_FILE, {}))  // nøgle: sha256(token) -> { username, created }
 };
 
-// Skrivninger lægges i kø pr. fil, så to samtidige requests ikke ødelægger filen.
-// Der skrives først til en .tmp-fil, som derefter omdøbes (atomisk skrivning).
-const queues = new Map();
+// Der skrives højst én gang ad gangen til hver fil, og højst én skrivning venter bagefter.
+// Gemmer flere requests, mens der skrives, deler de den ventende skrivning. Den laver først
+// JSON'en, når den går i gang, så den gemmer de nyeste data (data er altid det samme objekt,
+// db.users eller db.sessions), og der ligger ikke en kopi af hele filen i kø pr. request.
+const writes = new Map();   // fil -> { running, queued }
+
 function writeJson(file, data) {
-  const json = JSON.stringify(data, null, 2);
-  const prev = queues.get(file) || Promise.resolve();
-  const next = prev.then(async () => {
-    const tmp = file + '.tmp';
-    await fsp.writeFile(tmp, json, { mode: 0o600 });   // 0600: kun serverens egen bruger kan læse filen
-    await fsp.rename(tmp, file);
-  });
-  queues.set(file, next.catch(err => console.error('Kunne ikke gemme', file, err)));
-  return next;
+  let w = writes.get(file);
+  if (!w) writes.set(file, w = { running: Promise.resolve(), queued: null });
+  if (!w.queued) {
+    // .catch: en skrivning, der fejlede, må ikke forhindre den næste
+    w.queued = w.running.catch(() => {}).then(() => {
+      w.queued = null;
+      w.running = writeFileSafely(file, JSON.stringify(data, null, 2));
+      return w.running;
+    });
+    w.queued.catch(err => console.error('Kunne ikke gemme', file, err.message));
+  }
+  return w.queued;
 }
+
+// Skriver først til en .tmp-fil, som derefter omdøbes: så er filen aldrig halvt skrevet
+async function writeFileSafely(file, json) {
+  const tmp = file + '.tmp';
+  const fh = await fsp.open(tmp, 'w', 0o600);   // 0600: kun serverens egen bruger kan læse filen
+  try {
+    await fh.writeFile(json);
+    await fh.sync();   // data skal helt ned på disken før omdøbningen, ellers kan et strømsvigt give en tom fil
+  } finally {
+    await fh.close();
+  }
+  await fsp.rename(tmp, file);
+}
+
+// Skrivninger, der er i gang eller venter (bruges ved nedlukning)
+const pendingWrites = () => [...writes.values()].map(w => w.queued || w.running);
 const saveUsers = () => writeJson(USERS_FILE, db.users);
 const saveSessions = () => writeJson(SESSIONS_FILE, db.sessions);
 
@@ -309,7 +331,10 @@ async function handleApi(req, res, url) {
     db.users[key] = user;
     // Gamle sessioner fra en tidligere profil med samme navn må ikke virke for den nye
     dropSessions(key);
-    await saveUsers();
+    // Kunne profilen ikke gemmes, fjernes den igen. Ellers fandtes den kun indtil næste
+    // genstart, og et nyt forsøg med samme navn fik "optaget".
+    try { await saveUsers(); }
+    catch (err) { delete db.users[key]; throw err; }
     return sendJson(res, 201, { token: await createSession(key), user: publicUser(user) });
   }
 
@@ -488,3 +513,15 @@ server.listen(PORT, HOST, () => {
   console.log(`\n  Klädd kører på  http://${HOST}:${PORT}`);
   console.log('  Stop serveren med  Ctrl + C\n');
 });
+
+// Ctrl + C (SIGINT) eller SIGTERM (fx fra en hostingtjeneste): tag ikke imod nye forbindelser,
+// lad igangværende requests blive færdige, vent til alt er gemt, og stop så. Ellers kunne en
+// ændring, der lige var ved at blive skrevet, gå tabt.
+function shutdown() {
+  console.log('\n  Stopper Klädd … gemmer først de sidste ændringer.');
+  const finish = () => Promise.allSettled(pendingWrites()).then(() => process.exit(0));
+  server.close(finish);
+  setTimeout(finish, 2000).unref();   // en forbindelse, der hænger, venter vi højst 2 sekunder på
+}
+process.once('SIGINT', shutdown);
+process.once('SIGTERM', shutdown);
