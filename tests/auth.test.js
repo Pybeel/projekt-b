@@ -163,17 +163,11 @@ describe('POST /api/register', () => {
     }
   });
 
-  // db.users is a plain object, so db.users['__proto__'] / db.users['constructor'] are inherited
-  // values (Object.prototype / Object) rather than undefined.
+  // db.users used to be a plain object, so db.users['__proto__'] / db.users['constructor'] were
+  // inherited values (Object.prototype / Object) rather than undefined. Now they are ordinary names.
   for (const username of ['__proto__', 'constructor']) {
-    test(`registering the valid-looking username "${username}" either works or is cleanly refused with 400`, {
-      todo: `db.users is a plain object: register("${username}") currently answers 409 "${MSG.taken}" although nobody has that name`
-    }, async () => {
+    test(`the valid-looking username "${username}" is an ordinary free username`, async () => {
       const res = await register({ username, password: 'password1' });
-      if (res.status === 400) {
-        assert.equal(res.body.field, 'username');
-        return;
-      }
       assert.equal(res.status, 201, `got ${res.status} ${res.text}`);
       const again = await login({ username, password: 'password1' });
       assert.equal(again.status, 200);
@@ -231,10 +225,9 @@ describe('POST /api/login', () => {
     }
   });
 
+  // Used to be a 500: db.users["__proto__"] was Object.prototype, so verifyPassword() got salt undefined.
   for (const username of ['__proto__', 'constructor', 'Constructor', '__PROTO__']) {
-    test(`logging in as "${username}" (not a real account) is a normal 401`, {
-      todo: `login("${username}") currently answers 500: db.users["${username.toLowerCase()}"] is inherited from Object.prototype, so verifyPassword() gets salt undefined and scrypt throws`
-    }, async () => {
+    test(`logging in as "${username}" with the wrong password is a normal 401`, async () => {
       // Not the password used in the register test above, so this is a 401 whether or not
       // that test managed to create the account.
       const res = await login({ username, password: 'not-the-password' });

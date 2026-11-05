@@ -37,9 +37,14 @@ function readJson(file, fallback) {
   catch { return fallback; }
 }
 
+// Tabellerne er objekter uden prototype (Object.create(null)). I et almindeligt {} findes
+// db.users['__proto__'] og db.users['constructor'] allerede (arvet fra Object), så de
+// brugernavne var "optaget" og gav fejl ved login. Her er de bare almindelige nøgler.
+const table = data => Object.assign(Object.create(null), data);
+
 const db = {
-  users: readJson(USERS_FILE, {}),       // nøgle: brugernavn med små bogstaver
-  sessions: readJson(SESSIONS_FILE, {})  // nøgle: token -> { username, created }
+  users: table(readJson(USERS_FILE, {})),       // nøgle: brugernavn med små bogstaver
+  sessions: table(readJson(SESSIONS_FILE, {}))  // nøgle: token -> { username, created }
 };
 
 // Skrivninger lægges i kø pr. fil, så to samtidige requests ikke ødelægger filen.

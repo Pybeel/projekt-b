@@ -144,6 +144,28 @@ test('sessions older than 30 days are dropped at startup; younger ones survive',
   }
 });
 
+test('the usernames __proto__ and constructor survive a restart like any other account', async () => {
+  const first = await startServer();
+  let second;
+  try {
+    for (const username of ['__proto__', 'Constructor']) await first.register({ username, password: 'proto-pass' });
+    const plain = await first.register({ username: 'plain', password: 'proto-pass' });
+    await first.stop();
+    second = await startServer({ dir: first.dir });
+    for (const username of ['__proto__', 'constructor', 'plain']) {
+      const res = await second.api('POST', '/api/login', { body: { username, password: 'proto-pass' } });
+      assert.equal(res.status, 200, username);
+    }
+    assert.equal((await second.api('GET', '/api/me', { token: plain.token })).body.user.username, 'plain');
+    assert.equal((await second.api('POST', '/api/register', { body: { username: '__PROTO__', password: 'x'.repeat(8) } })).status, 409);
+    assert.deepEqual(Object.keys(readJson(second.dataFile('users.json'))).sort(), ['__proto__', 'constructor', 'plain']);
+  } finally {
+    await first.stop();
+    if (second) await second.close();
+    else await first.close();
+  }
+});
+
 test('missing data files start an empty database; a corrupt users.json is silently treated as empty', async () => {
   // Current behaviour, pinned: readJson() falls back to {} on any parse error and the next
   // save overwrites the corrupt file, so every existing account is lost without a warning.
