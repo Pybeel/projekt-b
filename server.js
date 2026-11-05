@@ -234,14 +234,20 @@ function sendJson(res, status, data) {
 
 function readBody(req) {
   return new Promise((resolve, reject) => {
+    const tooLarge = () => httpError(413, 'Forespørgslen er for stor.');
+    // Siger klienten på forhånd (Content-Length), at body'en er for stor, gemmes intet af den.
+    // req.resume() læser den bare væk, så klienten kan nå at få vores 413-svar.
+    if (Number(req.headers['content-length']) > MAX_BODY) { req.resume(); return reject(tooLarge()); }
     let size = 0;
-    const chunks = [];
+    let chunks = [];
     req.on('data', chunk => {
+      if (!chunks) return;   // allerede for stor: resten læses væk uden at blive gemt
       size += chunk.length;
-      if (size > MAX_BODY) { reject(httpError(413, 'Forespørgslen er for stor.')); req.destroy(); return; }
+      if (size > MAX_BODY) { chunks = null; reject(tooLarge()); return; }
       chunks.push(chunk);
     });
     req.on('end', () => {
+      if (!chunks) return;
       if (!chunks.length) return resolve({});
       try {
         const data = JSON.parse(Buffer.concat(chunks).toString('utf8'));
@@ -493,6 +499,8 @@ const server = http.createServer(async (req, res) => {
     const status = err.status || 500;
     if (status === 500) console.error(err);
     if (!res.headersSent) {
+      // Efter en for stor forespørgsel lukkes forbindelsen, så klienten ikke bliver ved med at sende
+      if (status === 413) res.setHeader('Connection', 'close');
       sendJson(res, status, {
         error: status === 500 ? 'Der skete en fejl på serveren.' : err.message,
         field: err.field

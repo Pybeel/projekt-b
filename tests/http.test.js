@@ -134,12 +134,53 @@ describe('request bodies', () => {
     assert.equal(login.status, 401, 'the oversized register must not have created the user');
   });
 
-  test('an oversized body gets a 413 JSON response', {
-    todo: 'readBody() calls req.destroy() right after reject(413), so the socket is gone before sendJson runs: the client sees an empty reply / ECONNRESET instead of 413 "Forespørgslen er for stor."'
-  }, async () => {
+  test('an oversized body gets a 413 JSON response and Connection: close', async () => {
     const res = await srv.raw(rawPost('/api/register', paddedRegisterBody(MAX_BODY + 1)));
     assert.equal(res.status, 413, `got status ${res.status}, error ${res.error?.code}, raw ${JSON.stringify(res.raw.slice(0, 80))}`);
+    assert.equal(res.headers['content-type'], 'application/json; charset=utf-8');
+    assert.equal(res.headers.connection, 'close');
     assert.deepEqual(JSON.parse(res.body), { error: MSG.tooLarge });
+  });
+
+  test('a Content-Length over the limit is answered with 413 before the body is even sent', async () => {
+    // Only the headers: the server must not wait for the 200 kB it was promised
+    const res = await srv.raw(
+      `POST /api/register HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: ${2 * MAX_BODY}\r\n\r\n`,
+      { timeout: 1500 }
+    );
+    assert.equal(res.status, 413, `got ${res.status} ${res.error?.message || ''}`);
+    assert.deepEqual(JSON.parse(res.body), { error: MSG.tooLarge });
+    assert.ok(await srv.isAlive());
+  });
+
+  test('an oversized chunked body (no Content-Length) also gets a 413 JSON response', async () => {
+    const body = paddedRegisterBody(MAX_BODY + 50_000, { username: 'chunky', password: 'password1' });
+    const chunks = [];
+    for (let i = 0; i < body.length; i += 16_384) {
+      const part = body.slice(i, i + 16_384);
+      chunks.push(`${Buffer.byteLength(part).toString(16)}\r\n${part}\r\n`);
+    }
+    const res = await srv.raw([
+      'POST /api/register HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n',
+      ...chunks,
+      '0\r\n\r\n'
+    ]);
+    assert.equal(res.status, 413, `got status ${res.status}, error ${res.error?.code}`);
+    assert.equal(res.headers.connection, 'close');
+    assert.deepEqual(JSON.parse(res.body), { error: MSG.tooLarge });
+    assert.ok(await srv.isAlive());
+    const login = await srv.api('POST', '/api/login', { body: { username: 'chunky', password: 'password1' } });
+    assert.equal(login.status, 401, 'the oversized register must not have created the user');
+  });
+
+  test('a chunked body just under the limit is still read', async () => {
+    const body = paddedRegisterBody(MAX_BODY - 10);
+    const res = await srv.raw([
+      'POST /api/register HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n',
+      `${Buffer.byteLength(body).toString(16)}\r\n${body}\r\n0\r\n\r\n`
+    ]);
+    assert.equal(res.status, 400);
+    assert.deepEqual(JSON.parse(res.body), { error: MSG.username, field: 'username' });
   });
 });
 
