@@ -269,13 +269,11 @@ describe('static files', () => {
 });
 
 describe('malformed request targets', () => {
-  // new URL(req.url, 'http://localhost') runs outside the try/catch in the request handler,
-  // so an unparsable target rejects the async handler -> unhandled rejection -> process exit.
-  // Each test gets its own throwaway server because the current code dies.
+  // new URL() throws on these targets. That used to happen outside the try/catch in the
+  // request handler (unhandled rejection -> process exit), so each test gets its own
+  // throwaway server: a regression kills only that one.
   for (const target of ['http://[', '//[']) {
-    test(`"GET ${target} HTTP/1.1" gets a 400 and the server keeps running`, {
-      todo: `new URL() throws "Invalid URL" outside the try/catch: one "GET ${target}" request kills the whole server process (remote DoS)`
-    }, () => withServer(async s => {
+    test(`"GET ${target} HTTP/1.1" gets a 400 JSON "Ugyldig adresse." and the server keeps running`, () => withServer(async s => {
       const res = await s.raw(rawGet(target));
       if (!(await s.isAlive())) {
         const code = await s.waitForExit();
@@ -283,6 +281,9 @@ describe('malformed request targets', () => {
         assert.fail(`server process died (exit ${code}: ${reason.trim()}); response was ${JSON.stringify(res.raw)}`);
       }
       assert.equal(res.status, 400);
+      assert.equal(res.headers['content-type'], 'application/json; charset=utf-8');
+      assert.deepEqual(JSON.parse(res.body), { error: MSG.badAddress });
+      assert.equal(s.logs.stderr, '', 'a bad address is not a server error');
     }));
   }
 

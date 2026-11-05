@@ -165,7 +165,9 @@ function readBody(req) {
         resolve(data && typeof data === 'object' ? data : {});
       } catch { reject(httpError(400, 'Ugyldig JSON.')); }
     });
-    req.on('error', reject);
+    // Klienten lukkede forbindelsen midt i body'en (fx en lukket fane). Det er ikke en
+    // serverfejl, så den skal ikke logges som en 500 med stack trace.
+    req.on('error', () => reject(httpError(400, 'Forespørgslen blev afbrudt.')));
   });
 }
 
@@ -338,7 +340,12 @@ async function serveStatic(req, res, url) {
    Selve serveren
    ============================================================ */
 const server = http.createServer(async (req, res) => {
-  const url = new URL(req.url, 'http://localhost');
+  // En ødelagt adresse som "//[" får new URL() til at kaste en fejl. Den skal fanges her,
+  // ellers vælter én enkelt forespørgsel hele serveren.
+  let url;
+  try { url = new URL(req.url, 'http://localhost'); }
+  catch { return sendJson(res, 400, { error: 'Ugyldig adresse.' }); }
+
   try {
     if (url.pathname.startsWith('/api/')) await handleApi(req, res, url);
     else await serveStatic(req, res, url);
@@ -354,7 +361,15 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
+// Fx hvis serveren allerede kører i et andet vindue: en forståelig besked i stedet for en stack trace
+server.on('error', err => {
+  if (err.code !== 'EADDRINUSE') throw err;
+  console.error(`\n  Porten ${PORT} er optaget (EADDRINUSE). Kører Klädd allerede i et andet vindue?`);
+  console.error(`  Stop den anden server, eller start med en anden port:  PORT=3001 npm start\n`);
+  process.exit(1);
+});
+
 server.listen(PORT, HOST, () => {
-  console.log(`\n  Klädd kører på  http://localhost:${PORT}`);
+  console.log(`\n  Klädd kører på  http://${HOST}:${PORT}`);
   console.log('  Stop serveren med  Ctrl + C\n');
 });

@@ -97,25 +97,27 @@ function spawnServer(dir, port) {
       liveChildren.delete(child);
       settle(reject, Object.assign(
         new Error(`server exited before it was ready (code ${code}, signal ${signal})\n${logs.stderr}`),
-        { logs }
+        { logs, code, signal }
       ));
     });
   });
 }
 
 /**
- * Start a server. Pass { dir } to reuse an existing app dir (restart / persistence tests).
+ * Start a server. Pass { dir } to reuse an existing app dir (restart / persistence tests),
+ * { port } to force a port (no retry if it is taken).
+ * If the process exits before it is ready, the promise rejects with { logs, code, signal }.
  * Returns a handle: { dir, port, base, child, logs, api(), register(), raw(), isAlive(), stop(), close() }.
  */
-async function startServer({ dir = makeAppDir() } = {}) {
+async function startServer({ dir = makeAppDir(), port: fixedPort } = {}) {
   let started;
   for (let attempt = 1; !started; attempt++) {
-    const port = await freePort();
+    const port = fixedPort ?? await freePort();
     try {
       started = { port, ...(await spawnServer(dir, port)) };
     } catch (err) {
       // Someone grabbed the port between freePort() and listen(): try another one.
-      if (attempt < 3 && /EADDRINUSE/.test(err.logs?.stderr || '')) continue;
+      if (fixedPort === undefined && attempt < 3 && /EADDRINUSE/.test(err.logs?.stderr || '')) continue;
       throw err;
     }
   }
@@ -283,7 +285,8 @@ const MSG = {
   badLocation: 'Ugyldigt sted.',
   tooManyLocations: 'Du kan højst gemme 12 steder.',
   orderMissing: 'Rækkefølgen mangler.',
-  locationNotFound: 'Stedet findes ikke.'
+  locationNotFound: 'Stedet findes ikke.',
+  badAddress: 'Ugyldig adresse.'
 };
 
 module.exports.MSG = MSG;
