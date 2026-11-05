@@ -5,6 +5,7 @@ const fs = require('fs');
 const fsp = fs.promises;
 const path = require('path');
 const crypto = require('crypto');
+const util = require('util');
 
 const PORT = Number(process.env.PORT) || 3000;
 const HOST = process.env.HOST || 'localhost';
@@ -13,9 +14,19 @@ const DATA_DIR = path.join(__dirname, 'data');
 const USERS_FILE = path.join(DATA_DIR, 'users.json');
 const SESSIONS_FILE = path.join(DATA_DIR, 'sessions.json');
 const SESSION_TTL = 1000 * 60 * 60 * 24 * 30; // 30 dage
+const MAX_SESSIONS = 10;                      // samtidige logins pr. bruger (de ældste smides ud)
 const MAX_BODY = 100 * 1024;                  // 100 kB
 const MAX_LOCATIONS = 12;
 const MIN_PASSWORD = 8;
+
+// Grænser mod gætteri af adgangskoder og masseoprettelse af profiler (se "Begrænsning af forsøg").
+// Miljøvariablerne findes KUN til testene, som opretter hundredvis af brugere fra samme IP
+// (127.0.0.1). Sæt dem ikke, når appen kører for rigtigt.
+const LOGIN_MAX_FAILS = Number(process.env.LOGIN_MAX_FAILS) || 5;  // forkerte logins pr. IP + brugernavn …
+const LOGIN_WINDOW = 1000 * 60 * 15;                               // … pr. 15 min
+const REGISTER_MAX = Number(process.env.REGISTER_MAX) || 20;       // nye profiler pr. IP …
+const REGISTER_WINDOW = 1000 * 60 * 60;                            // … pr. time
+const CLEANUP_INTERVAL = 1000 * 60 * 10;                           // oprydning hvert 10. minut
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -27,54 +38,151 @@ const MIME = {
   '.ico': 'image/x-icon'
 };
 
+// Sendes med alle svar: browseren må ikke gætte filtypen selv (nosniff), andre sider må ikke
+// vise appen i en <iframe> (mod "klik-kapring"), og eksterne tjenester får kun vores domæne at
+// vide som "referrer", ikke hele adressen.
+const SECURITY_HEADERS = {
+  'X-Content-Type-Options': 'nosniff',
+  'Referrer-Policy': 'strict-origin-when-cross-origin',
+  'X-Frame-Options': 'DENY'
+};
+
+// Content-Security-Policy for siderne: hvorfra browseren må hente scripts, styles, fonte og data.
+// Alt andet blokeres, så indsprøjtet kode ikke kan hente scripts udefra eller sende data væk.
+// Bruger front-enden en ny ekstern tjeneste (fx et andet vejr-API), skal den skrives på her.
+const CSP = [
+  "default-src 'self'",
+  "script-src 'self'",
+  "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",  // style="..." i app.js + Google Fonts
+  'font-src https://fonts.gstatic.com',                              // fontfilerne til Inter
+  "connect-src 'self' https://api.open-meteo.com https://geocoding-api.open-meteo.com https://api.bigdatacloud.net",  // vejr, bysøgning, bynavn
+  "img-src 'self' data:",
+  "object-src 'none'",
+  "base-uri 'none'",
+  "form-action 'self'",
+  "frame-ancestors 'none'"
+].join('; ');
+
 /* ============================================================
    Datalag — JSON-filer på disken
    ============================================================ */
 fs.mkdirSync(DATA_DIR, { recursive: true });
 
+// Kun en fil, der ikke findes endnu, giver en tom database. Er filen ødelagt, stopper serveren
+// hellere end at starte med en tom database: det næste gem ville ellers overskrive alle profiler.
 function readJson(file, fallback) {
-  try { return JSON.parse(fs.readFileSync(file, 'utf8')); }
-  catch { return fallback; }
+  let text;
+  try { text = fs.readFileSync(file, 'utf8'); }
+  catch (err) {
+    if (err.code === 'ENOENT') return fallback;
+    refuseToStart(file, `kan ikke læses (${err.code || err.message})`);
+  }
+  let data = null;
+  try { data = JSON.parse(text); } catch { /* håndteres lige herunder */ }
+  if (!data || typeof data !== 'object' || Array.isArray(data)) refuseToStart(file, 'er ødelagt (ikke et gyldigt JSON-objekt)');
+  return data;
 }
+
+function refuseToStart(file, problem) {
+  console.error(`\n  ${file} ${problem}.`);
+  console.error('  Serveren starter ikke, så filen ikke bliver overskrevet. Ret filen, gendan en kopi,');
+  console.error('  eller slet den, hvis dataene i den må gå tabt.\n');
+  process.exit(1);
+}
+
+// Tabellerne er objekter uden prototype (Object.create(null)). I et almindeligt {} findes
+// db.users['__proto__'] og db.users['constructor'] allerede (arvet fra Object), så de
+// brugernavne var "optaget" og gav fejl ved login. Her er de bare almindelige nøgler.
+const table = data => Object.assign(Object.create(null), data);
 
 const db = {
-  users: readJson(USERS_FILE, {}),       // nøgle: brugernavn med små bogstaver
-  sessions: readJson(SESSIONS_FILE, {})  // nøgle: token -> { username, created }
+  users: table(readJson(USERS_FILE, {})),       // nøgle: brugernavn med små bogstaver
+  sessions: table(readJson(SESSIONS_FILE, {}))  // nøgle: sha256(token) -> { username, created }
 };
 
-// Skrivninger lægges i kø pr. fil, så to samtidige requests ikke ødelægger filen.
-// Der skrives først til en .tmp-fil, som derefter omdøbes (atomisk skrivning).
-const queues = new Map();
+// Der skrives højst én gang ad gangen til hver fil, og højst én skrivning venter bagefter.
+// Gemmer flere requests, mens der skrives, deler de den ventende skrivning. Den laver først
+// JSON'en, når den går i gang, så den gemmer de nyeste data (data er altid det samme objekt,
+// db.users eller db.sessions), og der ligger ikke en kopi af hele filen i kø pr. request.
+const writes = new Map();   // fil -> { running, queued }
+
 function writeJson(file, data) {
-  const json = JSON.stringify(data, null, 2);
-  const prev = queues.get(file) || Promise.resolve();
-  const next = prev.then(async () => {
-    const tmp = file + '.tmp';
-    await fsp.writeFile(tmp, json);
-    await fsp.rename(tmp, file);
-  });
-  queues.set(file, next.catch(err => console.error('Kunne ikke gemme', file, err)));
-  return next;
+  let w = writes.get(file);
+  if (!w) writes.set(file, w = { running: Promise.resolve(), queued: null });
+  if (!w.queued) {
+    // .catch: en skrivning, der fejlede, må ikke forhindre den næste
+    w.queued = w.running.catch(() => {}).then(() => {
+      w.queued = null;
+      w.running = writeFileSafely(file, JSON.stringify(data, null, 2));
+      return w.running;
+    });
+    w.queued.catch(err => console.error('Kunne ikke gemme', file, err.message));
+  }
+  return w.queued;
 }
+
+// Skriver først til en .tmp-fil, som derefter omdøbes: så er filen aldrig halvt skrevet
+async function writeFileSafely(file, json) {
+  const tmp = file + '.tmp';
+  const fh = await fsp.open(tmp, 'w', 0o600);   // 0600: kun serverens egen bruger kan læse filen
+  try {
+    await fh.writeFile(json);
+    await fh.sync();   // data skal helt ned på disken før omdøbningen, ellers kan et strømsvigt give en tom fil
+  } finally {
+    await fh.close();
+  }
+  await fsp.rename(tmp, file);
+}
+
+// Skrivninger, der er i gang eller venter (bruges ved nedlukning)
+const pendingWrites = () => [...writes.values()].map(w => w.queued || w.running);
 const saveUsers = () => writeJson(USERS_FILE, db.users);
 const saveSessions = () => writeJson(SESSIONS_FILE, db.sessions);
 
-// Ryd udløbne sessioner ved opstart
-for (const [token, s] of Object.entries(db.sessions)) {
-  if (Date.now() - s.created > SESSION_TTL) delete db.sessions[token];
+// Sletter alle sessioner for et brugernavn
+function dropSessions(key) {
+  for (const [id, s] of Object.entries(db.sessions)) if (s.username === key) delete db.sessions[id];
 }
 
 /* ============================================================
    Adgangskoder — hashes med scrypt + salt (aldrig i klartekst)
    ============================================================ */
-function hashPassword(password, salt = crypto.randomBytes(16).toString('hex')) {
-  return { salt, hash: crypto.scryptSync(password, salt, 64).toString('hex') };
+// scrypt er med vilje langsom (ca. 20 ms). Den asynkrone udgave regner i en baggrundstråd, så
+// serveren kan svare andre imens. scryptSync fik alle andre requests til at vente i køen.
+const scrypt = util.promisify(crypto.scrypt);
+
+async function hashPassword(password, salt = crypto.randomBytes(16).toString('hex')) {
+  return { salt, hash: (await scrypt(password, salt, 64)).toString('hex') };
 }
-function verifyPassword(password, salt, hash) {
-  const a = crypto.scryptSync(password, salt, 64);
+async function verifyPassword(password, salt, hash) {
+  const a = await scrypt(password, salt, 64);
   const b = Buffer.from(hash, 'hex');
   return a.length === b.length && crypto.timingSafeEqual(a, b);
 }
+
+// Bruges ved login, når brugernavnet ikke findes: koden tjekkes alligevel (og passer aldrig).
+// Så tager "ukendt bruger" lige så lang tid som "forkert kode", og man kan ikke måle sig
+// frem til, hvilke brugernavne der findes.
+const NO_USER = { salt: '0'.repeat(32), hash: '0'.repeat(128) };
+
+/* ============================================================
+   Begrænsning af forsøg — mod gætteri af adgangskoder og spam
+   ============================================================ */
+// Huskes kun i hukommelsen (nøgle -> { count, start }) og glemmes ved genstart. Det er fint.
+const loginAttempts = new Map();   // nøgle: "IP brugernavn"
+const registrations = new Map();   // nøgle: IP
+
+// Tæller ét forsøg og svarer true, hvis der nu er for mange i det aktuelle tidsvindue
+function overLimit(map, key, max, windowMs) {
+  const now = Date.now();
+  let entry = map.get(key);
+  if (!entry || now - entry.start > windowMs) map.set(key, entry = { count: 0, start: now });
+  entry.count++;
+  return entry.count > max;
+}
+
+// NB: bag en proxy (fx hos en hostingtjeneste) er det proxyens IP, og så deler alle brugerne grænsen
+const clientIp = req => req.socket.remoteAddress || '';
 
 /* ============================================================
    Profil og præferencer (skærm 06–08 og 10)
@@ -82,6 +190,11 @@ function verifyPassword(password, salt, hash) {
 const AGE_GROUPS = ['under12', '12-17', '18-29', '30-49', '50+'];
 const COLD = ['fryser', 'normal', 'varm'];
 const TRANSPORT = ['cykel', 'gaar', 'offentlig', 'bil'];
+
+// Kun rigtige tekster og tal tæller. Number(x) gør null, "" og [] til 0, og String(x) gør
+// ["a","b"] til "a,b" og {} til "[object Object]" (og { toString: 1 } får String() til at kaste).
+const str = v => (typeof v === 'string' ? v : '');
+const num = v => (typeof v === 'number' && Number.isFinite(v) ? v : NaN);
 
 function defaultProfile() {
   return {
@@ -111,23 +224,24 @@ function sanitizeProfile(input, current = defaultProfile()) {
   return p;
 }
 
+// Mærkatet vises i en smal "chip" på forsiden, så det er højst 30 tegn, også når bynavnet
+// bruges i stedet for et tomt felt
 function cleanLabel(value, fallback) {
-  const label = String(value || '').trim().slice(0, 30);
-  return label || fallback;
+  return (str(value).trim() || fallback).slice(0, 30);
 }
 
 function sanitizeLocation(input) {
   const src = input && typeof input === 'object' ? input : {};
-  const lat = Number(src.lat), lon = Number(src.lon);
+  const lat = num(src.lat), lon = num(src.lon);   // front-enden sender altid rigtige tal
   if (!Number.isFinite(lat) || !Number.isFinite(lon) || Math.abs(lat) > 90 || Math.abs(lon) > 180) return null;
-  const name = String(src.name || '').trim().slice(0, 80);
+  const name = str(src.name).trim().slice(0, 80);
   if (!name) return null;
   return {
     id: crypto.randomBytes(6).toString('hex'),
     label: cleanLabel(src.label, name),   // fx "Hjem", "Campus", "Job"
     name,                                  // fx "Kolding"
-    region: String(src.region || '').trim().slice(0, 80),
-    country: String(src.country || '').trim().slice(0, 60),
+    region: str(src.region).trim().slice(0, 80),
+    country: str(src.country).trim().slice(0, 60),
     lat: Math.round(lat * 1e4) / 1e4,
     lon: Math.round(lon * 1e4) / 1e4
   };
@@ -149,42 +263,68 @@ function sendJson(res, status, data) {
   res.end(JSON.stringify(data));
 }
 
+function sendText(res, status, text) {
+  res.writeHead(status, { 'Content-Type': 'text/plain; charset=utf-8' });
+  res.end(text);
+}
+
 function readBody(req) {
   return new Promise((resolve, reject) => {
+    const tooLarge = () => httpError(413, 'Forespørgslen er for stor.');
+    // Siger klienten på forhånd (Content-Length), at body'en er for stor, gemmes intet af den.
+    // req.resume() læser den bare væk, så klienten kan nå at få vores 413-svar.
+    if (Number(req.headers['content-length']) > MAX_BODY) { req.resume(); return reject(tooLarge()); }
     let size = 0;
-    const chunks = [];
+    let chunks = [];
     req.on('data', chunk => {
+      if (!chunks) return;   // allerede for stor: resten læses væk uden at blive gemt
       size += chunk.length;
-      if (size > MAX_BODY) { reject(httpError(413, 'Forespørgslen er for stor.')); req.destroy(); return; }
+      if (size > MAX_BODY) { chunks = null; reject(tooLarge()); return; }
       chunks.push(chunk);
     });
     req.on('end', () => {
+      if (!chunks) return;
       if (!chunks.length) return resolve({});
       try {
         const data = JSON.parse(Buffer.concat(chunks).toString('utf8'));
         resolve(data && typeof data === 'object' ? data : {});
       } catch { reject(httpError(400, 'Ugyldig JSON.')); }
     });
-    req.on('error', reject);
+    // Klienten lukkede forbindelsen midt i body'en (fx en lukket fane). Det er ikke en
+    // serverfejl, så den skal ikke logges som en 500 med stack trace.
+    req.on('error', () => reject(httpError(400, 'Forespørgslen blev afbrudt.')));
   });
 }
 
-function createSession(username) {
+// I sessions.json gemmes kun en SHA-256 af tokenet, aldrig selve tokenet. Den, der får fat i
+// filen, kan altså ikke logge ind som andre: tokenet findes kun hos brugeren selv.
+const tokenId = token => crypto.createHash('sha256').update(token).digest('hex');
+
+async function createSession(username) {
   const token = crypto.randomBytes(32).toString('hex');
-  db.sessions[token] = { username, created: Date.now() };
-  saveSessions();
+  db.sessions[tokenId(token)] = { username, created: Date.now() };
+  // Højst MAX_SESSIONS pr. bruger, så filen ikke vokser for hvert login: de ældste ryger ud
+  const own = Object.entries(db.sessions)
+    .filter(([, s]) => s.username === username)
+    .sort((a, b) => a[1].created - b[1].created);
+  for (const [id] of own.slice(0, -MAX_SESSIONS)) delete db.sessions[id];
+  // Gemmes, før tokenet sendes: ellers kan sessionen gå tabt, hvis serveren stopper lige efter
+  await saveSessions();
   return token;
 }
 
 // Finder brugeren ud fra headeren "Authorization: Bearer <token>"
 function authUser(req) {
-  const m = /^Bearer\s+([a-f0-9]{64})$/i.exec(req.headers.authorization || '');
-  if (!m) return null;
-  const s = db.sessions[m[1]];
+  // Ordet "Bearer" må staves med store eller små bogstaver (det siger HTTP-standarden),
+  // men selve tokenet skal være præcis 64 hex-tegn med små bogstaver, som vi laver dem.
+  const m = /^(\S+)\s+([a-f0-9]{64})$/.exec(req.headers.authorization || '');
+  if (!m || m[1].toLowerCase() !== 'bearer') return null;
+  const id = tokenId(m[2]);
+  const s = db.sessions[id];
   if (!s) return null;
-  if (Date.now() - s.created > SESSION_TTL) { delete db.sessions[m[1]]; saveSessions(); return null; }
+  if (Date.now() - s.created > SESSION_TTL) { delete db.sessions[id]; saveSessions(); return null; }
   const user = db.users[s.username];
-  return user ? { user, token: m[1], key: s.username } : null;
+  return user ? { user, sessionId: id, key: s.username } : null;
 }
 
 /* ============================================================
@@ -207,8 +347,8 @@ async function handleApi(req, res, url) {
 
   if (method === 'POST' && pathname === '/api/register') {
     const body = await readBody(req);
-    const username = String(body.username || '').trim();
-    const password = String(body.password || '');
+    const username = str(body.username).trim();
+    const password = str(body.password);
     if (!/^[a-zA-Z0-9_.-]{3,24}$/.test(username)) {
       throw httpError(400, 'Brugernavnet skal være 3–24 tegn (bogstaver, tal og . _ -).', 'username');
     }
@@ -217,8 +357,13 @@ async function handleApi(req, res, url) {
     }
     const key = username.toLowerCase();
     if (db.users[key]) throw httpError(409, 'Brugernavnet er optaget.', 'username');
+    if (overLimit(registrations, clientIp(req), REGISTER_MAX, REGISTER_WINDOW)) {
+      throw httpError(429, 'For mange nye profiler på kort tid. Prøv igen senere.');
+    }
 
-    const { salt, hash } = hashPassword(password);
+    const { salt, hash } = await hashPassword(password);
+    // Mens koden blev hashet, kan en anden have nået at oprette samme navn: tjek igen
+    if (db.users[key]) throw httpError(409, 'Brugernavnet er optaget.', 'username');
     const user = {
       username, salt, hash,
       createdAt: new Date().toISOString(),
@@ -226,18 +371,34 @@ async function handleApi(req, res, url) {
       locations: []
     };
     db.users[key] = user;
-    await saveUsers();
-    return sendJson(res, 201, { token: createSession(key), user: publicUser(user) });
+    // Gamle sessioner fra en tidligere profil med samme navn må ikke virke for den nye
+    dropSessions(key);
+    // Kunne profilen ikke gemmes, fjernes den igen. Ellers fandtes den kun indtil næste
+    // genstart, og et nyt forsøg med samme navn fik "optaget".
+    try { await saveUsers(); }
+    catch (err) { delete db.users[key]; throw err; }
+    return sendJson(res, 201, { token: await createSession(key), user: publicUser(user) });
   }
 
   if (method === 'POST' && pathname === '/api/login') {
     const body = await readBody(req);
-    const key = String(body.username || '').trim().toLowerCase();
+    const key = str(body.username).trim().toLowerCase();
+    // Grænsen gælder pr. IP + brugernavn, så en angriber ikke kan låse den rigtige bruger ude.
+    // Forsøget tælles, FØR koden tjekkes, så 100 samtidige gæt heller ikke slipper igennem.
+    // (Brugernavnet kortes til 24 tegn — længere navne findes ikke, og nøglen skal være lille.)
+    const limitKey = clientIp(req) + ' ' + key.slice(0, 24);
+    if (overLimit(loginAttempts, limitKey, LOGIN_MAX_FAILS, LOGIN_WINDOW)) {
+      throw httpError(429, 'For mange forsøg. Prøv igen om lidt.', 'password');
+    }
     const user = db.users[key];
-    if (!user || !verifyPassword(String(body.password || ''), user.salt, user.hash)) {
+    const { salt, hash } = user || NO_USER;
+    const ok = await verifyPassword(str(body.password), salt, hash);
+    // Profilen kan være slettet, mens koden blev tjekket
+    if (!user || !ok || db.users[key] !== user) {
       throw httpError(401, 'Forkert brugernavn eller adgangskode', 'password');
     }
-    return sendJson(res, 200, { token: createSession(key), user: publicUser(user) });
+    loginAttempts.delete(limitKey);   // rigtig kode: tælleren starter forfra
+    return sendJson(res, 200, { token: await createSession(key), user: publicUser(user) });
   }
 
   // ---- Alt herunder kræver login ----
@@ -246,7 +407,7 @@ async function handleApi(req, res, url) {
   const { user } = auth;
 
   if (method === 'POST' && pathname === '/api/logout') {
-    delete db.sessions[auth.token];
+    delete db.sessions[auth.sessionId];
     await saveSessions();
     return sendJson(res, 200, { ok: true });
   }
@@ -257,7 +418,7 @@ async function handleApi(req, res, url) {
 
   if (method === 'DELETE' && pathname === '/api/me') {
     delete db.users[auth.key];
-    for (const [token, s] of Object.entries(db.sessions)) if (s.username === auth.key) delete db.sessions[token];
+    dropSessions(auth.key);
     await Promise.all([saveUsers(), saveSessions()]);
     return sendJson(res, 200, { ok: true });
   }
@@ -314,31 +475,63 @@ async function handleApi(req, res, url) {
    Statiske filer fra /public
    ============================================================ */
 async function serveStatic(req, res, url) {
-  if (req.method !== 'GET' && req.method !== 'HEAD') { res.writeHead(405); return res.end(); }
+  res.setHeader('Content-Security-Policy', CSP);
+  // 405 skal fortælle, hvilke metoder der virker (Allow)
+  if (req.method !== 'GET' && req.method !== 'HEAD') { res.writeHead(405, { Allow: 'GET, HEAD' }); return res.end(); }
   let rel;
   try { rel = decodeURIComponent(url.pathname); }
-  catch { res.writeHead(400); return res.end('Bad request'); }
+  catch { return sendText(res, 400, 'Ugyldig adresse.'); }
   if (rel.endsWith('/')) rel += 'index.html';
 
   const file = path.join(PUBLIC_DIR, rel);
   // Beskyt mod "../"-tricks, så man ikke kan læse filer uden for /public
-  if (!file.startsWith(PUBLIC_DIR + path.sep)) { res.writeHead(403); return res.end('Forbidden'); }
+  if (!file.startsWith(PUBLIC_DIR + path.sep)) return sendText(res, 403, 'Ingen adgang.');
 
   try {
     const data = await fsp.readFile(file);
-    res.writeHead(200, { 'Content-Type': MIME[path.extname(file)] || 'application/octet-stream' });
+    // Content-Length også ved HEAD, så man kan se filens størrelse uden at hente den
+    res.writeHead(200, { 'Content-Type': MIME[path.extname(file)] || 'application/octet-stream', 'Content-Length': data.length });
     res.end(req.method === 'HEAD' ? undefined : data);
   } catch {
-    res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
-    res.end('Ikke fundet');
+    sendText(res, 404, 'Ikke fundet');
   }
 }
+
+/* ============================================================
+   Oprydning — ved opstart og derefter hvert 10. minut
+   ============================================================ */
+function dropExpiredSessions() {
+  let changed = false;
+  for (const [id, s] of Object.entries(db.sessions)) {
+    if (Date.now() - s.created > SESSION_TTL) { delete db.sessions[id]; changed = true; }
+  }
+  if (changed) saveSessions();
+}
+function forgetOld(map, windowMs) {
+  const now = Date.now();
+  for (const [key, entry] of map) if (now - entry.start > windowMs) map.delete(key);
+}
+function cleanUp() {
+  dropExpiredSessions();
+  forgetOld(loginAttempts, LOGIN_WINDOW);
+  forgetOld(registrations, REGISTER_WINDOW);
+}
+cleanUp();
+// .unref(): timeren alene holder ikke serveren i gang
+setInterval(cleanUp, CLEANUP_INTERVAL).unref();
 
 /* ============================================================
    Selve serveren
    ============================================================ */
 const server = http.createServer(async (req, res) => {
-  const url = new URL(req.url, 'http://localhost');
+  for (const [name, value] of Object.entries(SECURITY_HEADERS)) res.setHeader(name, value);
+
+  // En ødelagt adresse som "//[" får new URL() til at kaste en fejl. Den skal fanges her,
+  // ellers vælter én enkelt forespørgsel hele serveren.
+  let url;
+  try { url = new URL(req.url, 'http://localhost'); }
+  catch { return sendJson(res, 400, { error: 'Ugyldig adresse.' }); }
+
   try {
     if (url.pathname.startsWith('/api/')) await handleApi(req, res, url);
     else await serveStatic(req, res, url);
@@ -346,6 +539,8 @@ const server = http.createServer(async (req, res) => {
     const status = err.status || 500;
     if (status === 500) console.error(err);
     if (!res.headersSent) {
+      // Efter en for stor forespørgsel lukkes forbindelsen, så klienten ikke bliver ved med at sende
+      if (status === 413) res.setHeader('Connection', 'close');
       sendJson(res, status, {
         error: status === 500 ? 'Der skete en fejl på serveren.' : err.message,
         field: err.field
@@ -354,7 +549,27 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
+// Fx hvis serveren allerede kører i et andet vindue: en forståelig besked i stedet for en stack trace
+server.on('error', err => {
+  if (err.code !== 'EADDRINUSE') throw err;
+  console.error(`\n  Porten ${PORT} er optaget (EADDRINUSE). Kører Klädd allerede i et andet vindue?`);
+  console.error(`  Stop den anden server, eller start med en anden port:  PORT=3001 npm start\n`);
+  process.exit(1);
+});
+
 server.listen(PORT, HOST, () => {
-  console.log(`\n  Klädd kører på  http://localhost:${PORT}`);
+  console.log(`\n  Klädd kører på  http://${HOST}:${PORT}`);
   console.log('  Stop serveren med  Ctrl + C\n');
 });
+
+// Ctrl + C (SIGINT) eller SIGTERM (fx fra en hostingtjeneste): tag ikke imod nye forbindelser,
+// lad igangværende requests blive færdige, vent til alt er gemt, og stop så. Ellers kunne en
+// ændring, der lige var ved at blive skrevet, gå tabt.
+function shutdown() {
+  console.log('\n  Stopper Klädd … gemmer først de sidste ændringer.');
+  const finish = () => Promise.allSettled(pendingWrites()).then(() => process.exit(0));
+  server.close(finish);
+  setTimeout(finish, 2000).unref();   // en forbindelse, der hænger, venter vi højst 2 sekunder på
+}
+process.once('SIGINT', shutdown);
+process.once('SIGTERM', shutdown);
