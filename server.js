@@ -38,6 +38,31 @@ const MIME = {
   '.ico': 'image/x-icon'
 };
 
+// Sendes med alle svar: browseren må ikke gætte filtypen selv (nosniff), andre sider må ikke
+// vise appen i en <iframe> (mod "klik-kapring"), og eksterne tjenester får kun vores domæne at
+// vide som "referrer", ikke hele adressen.
+const SECURITY_HEADERS = {
+  'X-Content-Type-Options': 'nosniff',
+  'Referrer-Policy': 'strict-origin-when-cross-origin',
+  'X-Frame-Options': 'DENY'
+};
+
+// Content-Security-Policy for siderne: hvorfra browseren må hente scripts, styles, fonte og data.
+// Alt andet blokeres, så indsprøjtet kode ikke kan hente scripts udefra eller sende data væk.
+// Bruger front-enden en ny ekstern tjeneste (fx et andet vejr-API), skal den skrives på her.
+const CSP = [
+  "default-src 'self'",
+  "script-src 'self'",
+  "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",  // style="..." i app.js + Google Fonts
+  'font-src https://fonts.gstatic.com',                              // fontfilerne til Inter
+  "connect-src 'self' https://api.open-meteo.com https://geocoding-api.open-meteo.com https://api.bigdatacloud.net",  // vejr, bysøgning, bynavn
+  "img-src 'self' data:",
+  "object-src 'none'",
+  "base-uri 'none'",
+  "form-action 'self'",
+  "frame-ancestors 'none'"
+].join('; ');
+
 /* ============================================================
    Datalag — JSON-filer på disken
    ============================================================ */
@@ -236,6 +261,11 @@ const httpError = (status, message, field) => Object.assign(new Error(message), 
 function sendJson(res, status, data) {
   res.writeHead(status, { 'Content-Type': MIME['.json'], 'Cache-Control': 'no-store' });
   res.end(JSON.stringify(data));
+}
+
+function sendText(res, status, text) {
+  res.writeHead(status, { 'Content-Type': 'text/plain; charset=utf-8' });
+  res.end(text);
 }
 
 function readBody(req) {
@@ -445,23 +475,25 @@ async function handleApi(req, res, url) {
    Statiske filer fra /public
    ============================================================ */
 async function serveStatic(req, res, url) {
-  if (req.method !== 'GET' && req.method !== 'HEAD') { res.writeHead(405); return res.end(); }
+  res.setHeader('Content-Security-Policy', CSP);
+  // 405 skal fortælle, hvilke metoder der virker (Allow)
+  if (req.method !== 'GET' && req.method !== 'HEAD') { res.writeHead(405, { Allow: 'GET, HEAD' }); return res.end(); }
   let rel;
   try { rel = decodeURIComponent(url.pathname); }
-  catch { res.writeHead(400); return res.end('Bad request'); }
+  catch { return sendText(res, 400, 'Ugyldig adresse.'); }
   if (rel.endsWith('/')) rel += 'index.html';
 
   const file = path.join(PUBLIC_DIR, rel);
   // Beskyt mod "../"-tricks, så man ikke kan læse filer uden for /public
-  if (!file.startsWith(PUBLIC_DIR + path.sep)) { res.writeHead(403); return res.end('Forbidden'); }
+  if (!file.startsWith(PUBLIC_DIR + path.sep)) return sendText(res, 403, 'Ingen adgang.');
 
   try {
     const data = await fsp.readFile(file);
-    res.writeHead(200, { 'Content-Type': MIME[path.extname(file)] || 'application/octet-stream' });
+    // Content-Length også ved HEAD, så man kan se filens størrelse uden at hente den
+    res.writeHead(200, { 'Content-Type': MIME[path.extname(file)] || 'application/octet-stream', 'Content-Length': data.length });
     res.end(req.method === 'HEAD' ? undefined : data);
   } catch {
-    res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
-    res.end('Ikke fundet');
+    sendText(res, 404, 'Ikke fundet');
   }
 }
 
@@ -492,6 +524,8 @@ setInterval(cleanUp, CLEANUP_INTERVAL).unref();
    Selve serveren
    ============================================================ */
 const server = http.createServer(async (req, res) => {
+  for (const [name, value] of Object.entries(SECURITY_HEADERS)) res.setHeader(name, value);
+
   // En ødelagt adresse som "//[" får new URL() til at kaste en fejl. Den skal fanges her,
   // ellers vælter én enkelt forespørgsel hele serveren.
   let url;

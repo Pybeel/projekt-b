@@ -240,10 +240,20 @@ describe('static files', () => {
     }
   });
 
-  test('400 "Bad request" for a malformed percent-encoding', async () => {
+  test('400 "Ugyldig adresse." (text/plain, Danish) for a malformed percent-encoding', async () => {
+    // Used to be an untyped English "Bad request"
     const res = await srv.raw(rawGet('/%E0%A4%A'));
     assert.equal(res.status, 400);
-    assert.equal(res.body, 'Bad request');
+    assert.equal(res.headers['content-type'], 'text/plain; charset=utf-8');
+    assert.equal(res.body, 'Ugyldig adresse.');
+  });
+
+  test('403 "Ingen adgang." (text/plain, Danish) for an encoded path that escapes public/', async () => {
+    // Used to be an untyped English "Forbidden"
+    const res = await srv.raw(rawGet('/..%2fserver.js'));
+    assert.equal(res.status, 403);
+    assert.equal(res.headers['content-type'], 'text/plain; charset=utf-8');
+    assert.equal(res.body, 'Ingen adgang.');
   });
 
   test('path traversal over a raw socket never escapes public/ (403 or 404)', async () => {
@@ -284,28 +294,93 @@ describe('static files', () => {
     }
   });
 
-  test('405 responses carry an Allow: GET, HEAD header', {
-    todo: 'serveStatic() answers 405 without an Allow header (RFC 9110 §15.5.6 says the server MUST send one)'
-  }, async () => {
+  test('405 responses carry an Allow: GET, HEAD header', async () => {
     const res = await fetch(srv.base + '/', { method: 'POST' });
     await res.arrayBuffer();
     assert.equal(res.status, 405);
     assert.match(res.headers.get('allow') || '', /^GET,\s*HEAD$/);
   });
 
-  test('HEAD returns the headers without a body', async () => {
+  test('HEAD returns the headers, including the real Content-Length, without a body', async () => {
     const res = await fetch(srv.base + '/', { method: 'HEAD' });
     assert.equal(res.status, 200);
     assert.equal(res.headers.get('content-type'), 'text/html; charset=utf-8');
+    assert.equal(res.headers.get('content-length'), String(file('index.html').length));
     assert.equal(await res.text(), '');
 
     const raw = await srv.raw(rawGet('/css/style.css', 'HEAD'));
     assert.equal(raw.status, 200);
     assert.equal(raw.headers['content-type'], 'text/css; charset=utf-8');
+    assert.equal(raw.headers['content-length'], String(file('css/style.css').length));
     assert.equal(raw.body, '');
 
     const missing = await fetch(srv.base + '/nope.html', { method: 'HEAD' });
     assert.equal(missing.status, 404);
+  });
+});
+
+describe('security headers', () => {
+  const SECURITY = {
+    'x-content-type-options': 'nosniff',
+    'referrer-policy': 'strict-origin-when-cross-origin',
+    'x-frame-options': 'DENY'
+  };
+  const check = (headers, what) => {
+    const get = name => (typeof headers.get === 'function' ? headers.get(name) : headers[name]);
+    for (const [name, value] of Object.entries(SECURITY)) assert.equal(get(name), value, `${what}: ${name}`);
+    return get;
+  };
+  const cspOf = text => Object.fromEntries(text.split(';').map(d => d.trim().split(/\s+/)).map(([k, ...v]) => [k, v]));
+
+  test('every static response has nosniff, Referrer-Policy, X-Frame-Options and the CSP', async () => {
+    for (const [method, p, status] of [['GET', '/', 200], ['GET', '/js/app.js', 200], ['HEAD', '/', 200], ['GET', '/nope', 404], ['POST', '/', 405]]) {
+      const res = await fetch(srv.base + p, { method });
+      await res.arrayBuffer();
+      assert.equal(res.status, status, `${method} ${p}`);
+      const get = check(res.headers, `${method} ${p}`);
+      const csp = cspOf(get('content-security-policy') || '');
+      assert.deepEqual(csp['script-src'], ["'self'"], `${method} ${p}: scripts only from our own server`);
+      assert.deepEqual(csp['object-src'], ["'none'"]);
+      assert.deepEqual(csp['frame-ancestors'], ["'none'"]);
+      assert.deepEqual(csp['default-src'], ["'self'"]);
+    }
+    for (const target of ['/%E0%A4%A', '/..%2fserver.js']) check((await srv.raw(rawGet(target))).headers, target);
+  });
+
+  test('API responses (also errors and a bad address) have the security headers too', async () => {
+    check((await srv.api('GET', '/api/me', { token })).headers, 'GET /api/me');
+    check((await srv.api('GET', '/api/me')).headers, '401');
+    check((await srv.api('GET', '/api/nope', { token })).headers, '404');
+    check((await srv.api('POST', '/api/register', { body: '{bad' })).headers, '400');
+    check((await srv.raw(rawGet('//['))).headers, 'GET //[');
+  });
+
+  test('the CSP allows every external host the frontend uses, and public/ has no inline scripts', async () => {
+    // If the frontend starts using a new external service, add it to CSP in server.js.
+    const res = await fetch(srv.base + '/');
+    await res.arrayBuffer();
+    const csp = cspOf(res.headers.get('content-security-policy'));
+    const allowed = [...csp['connect-src'], ...csp['style-src'], ...csp['font-src']];
+
+    const files = [];
+    (function walk(dir) {
+      for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+        if (e.isDirectory()) walk(path.join(dir, e.name));
+        else if (/\.(html|js|css)$/.test(e.name)) files.push(path.join(dir, e.name));
+      }
+    })(path.join(REPO_DIR, 'public'));
+    const origins = new Set();
+    for (const f of files) {
+      const text = fs.readFileSync(f, 'utf8');
+      for (const [origin] of text.matchAll(/https?:\/\/[a-z0-9.-]+/gi)) {
+        if (origin !== 'http://www.w3.org') origins.add(origin);   // the SVG namespace is not a request
+      }
+      assert.doesNotMatch(text, /<script(?![^>]*\bsrc=)[^>]*>/i, `${f}: an inline <script> would be blocked by script-src 'self'`);
+      assert.doesNotMatch(text, /\son[a-z]+\s*=\s*["'`]/i, `${f}: an inline event handler would be blocked`);
+      assert.doesNotMatch(text, /\beval\(|new Function\(/, `${f}: eval would be blocked`);
+    }
+    assert.ok(origins.size >= 5, `found only ${[...origins]}`);
+    for (const origin of origins) assert.ok(allowed.includes(origin), `${origin} is used in public/ but not allowed by the CSP`);
   });
 });
 
